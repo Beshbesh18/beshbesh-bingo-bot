@@ -1,28 +1,23 @@
-
 import os
-import threading
-from flask import Flask
+import logging
+from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, CallbackQueryHandler
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler
 
-# 1. 24/7 Uptime ለማቆየት የሚረዳ የ Flask ሰርቨር
-app = Flask('')
+# Logging ማስተካከል
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-@app.route('/')
-def home():
-    return "Telegram Bingo Bot is running 24/7 on Render!"
-
-def run_flask():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
-
-# 2. የቦት ቶከን
 TOKEN = "8891809240:AAGTl1vmyt-Gd1DIFJSAkm-BjpeLDS-Wm3M"
 PAYMENT_INFO = "ቴሌብር / CBE: 0918719332"
-
 balances = {}
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+app = Flask(__name__)
+
+# ቴሌግራም አፕሊኬሽኑን ማስጀመር (առանց run_polling)
+application = Application.builder().token(TOKEN).build()
+
+async def start(update: Update, context):
     user_id = update.effective_user.id
     if user_id not in balances:
         balances[user_id] = 100.0
@@ -43,7 +38,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def button_handler(update: Update, context):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
@@ -52,43 +47,40 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         balances[user_id] = 100.0
 
     if query.data == "balance":
-        await query.edit_message_text(
-            f"💰 የእርስዎ ቀሪ ሂሳብ: {balances[user_id]} ብር",
-            parse_mode="Markdown"
-        )
+        await query.edit_message_text(f"💰 የእርስዎ ቀሪ ሂሳብ: {balances[user_id]} ብር", parse_mode="Markdown")
     elif query.data == "deposit":
-        await query.edit_message_text(
-            f"📥 ገንዘብ ለማስገባት (Deposit):\n\n"
-            f"እባክዎ ገንዘቡን በሚከተለው አካውንት ያስተላልፉ:\n\n"
-            f"📌 {PAYMENT_INFO}\n\n"
-            f"ငንዘቡን ካስተላለፉ በኋላ የትራንዛክሽን ማረጋገጫውን ለአስተዳዳሪው ይላኩ።",
-            parse_mode="Markdown"
-        )
+        await query.edit_message_text(f"📥 ገንዘብ ለማስገባት (Deposit):\n\nእባክዎ ገንዘቡን በሚከተለው አካውንት ያስተላልፉ:\n\n📌 {PAYMENT_INFO}", parse_mode="Markdown")
     elif query.data == "withdraw":
-        await query.edit_message_text(
-            f"📤 ገንዘብ ለማውጣት (Withdraw):\n\n"
-            f"የማውጫ ጥያቄዎ ተመዝግቧል። አስተዳዳሪው ሲያረጋግጥ ወደ አካውንትዎ ይላካል።",
-            parse_mode="Markdown"
-        )
+        await query.edit_message_text(f"📤 ገንዘብ ለማውጣት (Withdraw):\n\nየማውጫ ጥያቄዎ ተመዝግቧል።", parse_mode="Markdown")
     elif query.data == "play_bingo":
-        await query.edit_message_text(
-            f"🎮 ቢንጎ ጨዋታ ተጀምሯል!\n\n"
-            f"ቁጥሮች እየተጠሩ ነው... መልካም እድል!\n"
-            f"(የዴሞ ጨዋታ በሂደት ላይ ነው)",
-            parse_mode="Markdown"
-        )
+        await query.edit_message_text(f"🎮 ቢንጎ ጨዋታ ተጀምሯል!\n\nቁጥሮች እየተጠሩ ነው...", parse_mode="Markdown")
 
-def main():
-    t = threading.Thread(target=run_flask)
-    t.start()
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CallbackQueryHandler(button_handler))
 
-    application = ApplicationBuilder().token(TOKEN).build()
-    
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(button_handler))
+@app.route('/')
+def home():
+    return "Telegram Bingo Bot is running via Webhook on Render!"
 
-    print("በሽ በሽ ቢንጎ ቦት በሥራ ላይ ነው...")
-    application.run_polling()
+@app.route(f'/{TOKEN}', methods=['POST'])
+def webhook():
+    """ቴሌግራም የሚልከውን መረጃ የሚቀበለው ክፍል"""
+    update = Update.de_json(request.get_json(force=True), application.bot)
+    application.update_queue.put(update)
+    return "OK", 200
 
 if __name__ == '__main__':
-    main()
+    # ቦቱ ሲነሳ ዌብሁክን ከ Render ዩአርኤል ጋር ማያያዝ
+    PORT = int(os.environ.get("PORT", 10000))
+    WEBHOOK_URL = f"https://beshbesh-bingo-bot-5.onrender.com/{TOKEN}"
+    
+    # Bot webhook ማስተካከል
+    import asyncio
+    async def setup_webhook():
+        await application.initialize()
+        await application.bot.set_webhook(url=WEBHOOK_URL)
+        logger.info(f"Webhook set to {WEBHOOK_URL}")
+
+    asyncio.run(setup_webhook())
+    
+    app.run(host='0.0.0.0', port=PORT)
