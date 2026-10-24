@@ -17,7 +17,7 @@ def run_flask():
     app.run(host='0.0.0.0', port=port)
 
 # 2. የቦት ቶከን
-TOKEN = "8891809240:AAG0dKX9863zZSD5b6CrKN514EjeaOKNMm0"
+TOKEN = "8891809240:AAGTl1vmyt-Gd1DIFJSAkm-BjpeLDS-Wm3M"
 PAYMENT_INFO = "ቴሌብር / CBE: 0918719332"
 
 balances = {}
