@@ -1,21 +1,44 @@
 import os
 import logging
+import asyncio
+import threading
 from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler
 
-# Logging ማስተካከል
+# ሎጊንግ ማስተካከል
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-TOKEN = "8891809240:AAGTl1vmyt-Gd1DIFJSAkm-BjpeLDS-Wm3M"
+# አዲሱ ቶከን እዚህ ተካቷል
+TOKEN = "8389391544:AAH1id2OWlLoC92_oXDRgcOfEAP48Uh1oL0"
 PAYMENT_INFO = "ቴሌብር / CBE: 0918719332"
 balances = {}
 
 app = Flask(__name__)
 
-# ቴሌግራም አፕሊኬሽኑን ማስጀመር (առանց run_polling)
+# 1. ለአስራር (Async) የሚሆን የተለየ የጀርባ ሉፕ (Background Loop) መፍጠር
+main_loop = asyncio.new_event_loop()
+
+def run_async_loop(loop):
+    asyncio.set_event_loop(loop)
+    loop.run_forever()
+
+# ሉፑን በጀርባ ትሬድ (Thread) ማስጀመር
+t = threading.Thread(target=run_async_loop, args=(main_loop,), daemon=True)
+t.start()
+
+# ቴሌግራም አፕሊኬሽኑን ማስጀመር
 application = Application.builder().token(TOKEN).build()
+
+async def setup_bot():
+    await application.initialize()
+    WEBHOOK_URL = f"https://beshbesh-bingo-bot-5.onrender.com/{TOKEN}"
+    await application.bot.set_webhook(url=WEBHOOK_URL)
+    logger.info(f"Webhook set to {WEBHOOK_URL}")
+
+# ቦቱ ሲነሳ ዌብሁኩን በጀርባ ሉፕ ማዋቀር
+asyncio.run_coroutine_threadsafe(setup_bot(), main_loop)
 
 async def start(update: Update, context):
     user_id = update.effective_user.id
@@ -64,24 +87,16 @@ def home():
 
 @app.route(f'/{TOKEN}', methods=['POST'])
 def webhook():
-    """ቴሌግራም የሚልከውን መረጃ የሚቀበለው ክፍል"""
-    update = Update.de_json(request.get_json(force=True), application.bot)
-    application.update_queue.put(update)
+    """ቴሌግራም መልእክት ሲልክ የሚቀበለው እና ወደ ቦቱ የሚያስተላልፈው ትክክለኛ ክፍል"""
+    try:
+        json_data = request.get_json(force=True)
+        update = Update.de_json(json_data, application.bot)
+        # መልእክቱን በጀርባው ባለው ሉፕ ማስተካከል
+        asyncio.run_coroutine_threadsafe(application.process_update(update), main_loop)
+    except Exception as e:
+        logger.error(f"Error processing update: {e}")
     return "OK", 200
 
 if __name__ == '__main__':
-    # ቦቱ ሲነሳ ዌብሁክን ከ Render ዩአርኤል ጋር ማያያዝ
     PORT = int(os.environ.get("PORT", 10000))
-    WEBHOOK_URL = f"https://beshbesh-bingo-bot-5.onrender.com/{TOKEN}"
-    
-    # Bot webhook ማስተካከል
-    import asyncio
-    async def setup_webhook():
-        await application.initialize()
-        await application.bot.set_webhook(url=WEBHOOK_URL)
-        logger.info(f"Webhook set to {WEBHOOK_URL}")
-
-    asyncio.run(setup_webhook())
-    
     app.run(host='0.0.0.0', port=PORT)
-
