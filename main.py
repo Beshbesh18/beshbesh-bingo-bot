@@ -11,11 +11,10 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# አዲሱ ቶከን እዚህ ተካቷል
+# የቦት ቶከን (በእርስዎ ቶከን የተተካ)
 TOKEN = "8389391544:AAH1id2OWlLoC92_oXDRgcOfEAP48Uh1oL0"
-PAYMENT_INFO = "ቴሌብር / CBE: 0918719332"
 
-# የውሂብ ማከማቻዎች (በከፍተኛ ተጫዋች ብዛት (እስከ 5000) ለመቋቋም የተዘጋጁ)
+# የውሂብ ማከማቻዎች (እስከ 5,000 ተጫዋቾችን ለመቋቋም የተዘጋጀ)
 balances = {}
 game_state = {
     "is_active": False,
@@ -29,7 +28,7 @@ game_state = {
 
 app = Flask(__name__)
 
-# 1. ለአስራር (Async) የሚሆን የተለየ የጀርባ ሉፕ (Background Loop) መፍጠር
+# ለአስራር (Async) የሚሆን የተለየ የጀርባ ሉፕ (Background Loop) መፍጠር
 main_loop = asyncio.new_event_loop()
 
 def run_async_loop(loop):
@@ -49,19 +48,20 @@ async def setup_bot():
 
 asyncio.run_coroutine_threadsafe(setup_bot(), main_loop)
 
-# ----------------- ቢንጎ ጨዋታ ሎጂክ እና ካርድ ማመንጨት -----------------
+# ----------------- ቢንጎ ካርድ (5x5) እና B-I-N-G-O ሎጂክ -----------------
 def generate_bingo_card():
-    """ከ 1 እስከ 75 ያሉ ቁጥሮችን በመጠቀም የሀበሻ ቢንጎ ካርድ ማመንጨት (5x5)"""
-    card = []
-    # B: 1-15, I: 16-30, N: 31-45, G: 46-60, O: 61-75
+    """
+    B: 1-15, I: 16-30, N: 31-45, G: 46-60, O: 61-75
+    5x5 ማትሪክስ ማመንጨት
+    """
     cols = [
-        random.sample(range(1, 16), 5),
-        random.sample(range(16, 31), 5),
-        random.sample(range(31, 46), 5),
-        random.sample(range(46, 61), 5),
-        random.sample(range(61, 76), 5)
+        random.sample(range(1, 16), 5),   # B
+        random.sample(range(16, 31), 5),  # I
+        random.sample(range(31, 46), 5),  # N
+        random.sample(range(46, 61), 5),  # G
+        random.sample(range(61, 76), 5)   # O
     ]
-    # ማትሪክሱን ማስተካከል (Transpose)
+    card = []
     for r in range(5):
         row = [cols[c][r] for c in range(5)]
         card.append(row)
@@ -71,7 +71,7 @@ def generate_bingo_card():
     return card
 
 def check_win(card, marked_set):
-    """አግድም፣ ቀጥታ፣ ኮርነር፣ ስላሽ እና ሙሉ ዝግ (Full House) ማረጋገጫ"""
+    """አግድም፣ ቀጥታ፣ ኮርነር፣ ስላሽ እና ሙሉ ቢንጎ ማረጋገጫ"""
     size = 5
     
     # 1. አግድም (Horizontal)
@@ -95,7 +95,7 @@ def check_win(card, marked_set):
     if all(card[r][c] in marked_set for r, c in corners):
         return "ኮርነር (Corners)"
 
-    # 5. አንድ ዝግ / ሙሉ (Full House)
+    # 5. ሙሉ ዝግ (Full House Bingo!)
     all_cells = [card[r][c] for r in range(size) for c in range(size) if card[r][c] != "FREE"]
     if all(num in marked_set for num in all_cells):
         return "ሙሉ ዝግ (Full House Bingo!)"
@@ -139,8 +139,34 @@ async def button_handler(update: Update, context):
             parse_mode="Markdown"
         )
     elif query.data == "deposit":
+        # ቴሌብር እና ሲቢኢ ብር አማራጮች ማቅረቢያ
+        keyboard = [
+            [InlineKeyboardButton("📱 ቴሌብር (Telebirr)", callback_data="pay_telebirr")],
+            [InlineKeyboardButton("🏦 ሲቢኢ ብር (CBE Birr)", callback_data="pay_cbe")],
+            [InlineKeyboardButton("🔙 ወደ ዋናው ምናሌ", callback_data="main_menu")]
+        ]
         await query.edit_message_text(
-            f"📥 ገንዘብ ለማስገባት (Deposit):\n\nእባክዎ ገንዘቡን በሚከተለው አካውንት ያስተላልፉ:\n\n📌 {PAYMENT_INFO}\n\nገንዘቡን ከላኩ በኋላ ደረሰኙን ለአድሚን ያጋሩ።", 
+            "📥 **ገንዘብ ማስገባት (Deposit)**\n\nእባክዎ ገንዘብ ሊያስገቡበት የሚፈልጉትን የክፍያ አማራጭ ይምረጡ፡",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+    elif query.data == "pay_telebirr":
+        await query.edit_message_text(
+            "📱 **ቴሌብር (Telebirr) አካውንት**:\n\n"
+            "• ስም: በሽ በሽ ቢንጎ\n"
+            "• ቁጥር: `0918719332`\n\n"
+            "ገንዘቡን ካስተላለፉ በኋላ የግብይቱን ማረጋገጫ (Screenshot) ለአድሚን ይላኩ።",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 ተመለስ", callback_data="deposit")]]),
+            parse_mode="Markdown"
+        )
+    elif query.data == "pay_cbe":
+        await query.edit_message_text(
+            "🏦 **ሲቢኢ ብር / የባንክ አካውንት**:\n\n"
+            "• የባንክ ስም: የኢትዮጵያ ንግድ ባንክ (CBE)\n"
+            "• አካውንት ቁጥር: `1000XXXXXXXXX`\n"
+            "• ስም: በሽ በሽ ቢንጎ\n\n"
+            "ገንዘቡን ካስተላለፉ በኋላ ደረሰኙን ለአድሚን ይላኩ።",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 ተመለስ", callback_data="deposit")]]),
             parse_mode="Markdown"
         )
     elif query.data == "withdraw":
@@ -149,7 +175,6 @@ async def button_handler(update: Update, context):
             parse_mode="Markdown"
         )
     elif query.data == "play_bingo":
-        # ተጫዋቹን ወደ ጨዋታው ማስገባት እና ካርድ ማመንጨት
         game_state["players"].add(user_id)
         if user_id not in game_state["cards"]:
             game_state["cards"][user_id] = generate_bingo_card()
@@ -158,8 +183,18 @@ async def button_handler(update: Update, context):
         card = game_state["cards"][user_id]
         marked = game_state["marked"][user_id]
 
-        # የካርድ አቀማመጥ በቁልፍ ሰሌዳ (Interactive Keyboard) መልክ ማዘጋጀት
+        # የካርድ አቀማመጥ ከ B-I-N-G-O ራሶች ጋር ማሳየት
         keyboard = []
+        # የፊደላት ራስጌ ማሳያ
+        header_row = [
+            InlineKeyboardButton("B", callback_data="noop"),
+            InlineKeyboardButton("I", callback_data="noop"),
+            InlineKeyboardButton("N", callback_data="noop"),
+            InlineKeyboardButton("G", callback_data="noop"),
+            InlineKeyboardButton("O", callback_data="noop")
+        ]
+        keyboard.append(header_row)
+
         for r_idx, row in enumerate(card):
             row_buttons = []
             for c_idx, val in enumerate(row):
@@ -168,7 +203,7 @@ async def button_handler(update: Update, context):
                     cb_data = f"cell_free_{r_idx}_{c_idx}"
                 else:
                     status = "✅" if val in marked else "⬜"
-                    btn_text = f"{status} {val}"
+                    btn_text = f"{status}{val}"
                     cb_data = f"cell_{val}"
                 row_buttons.append(InlineKeyboardButton(btn_text, callback_data=cb_data))
             keyboard.append(row_buttons)
@@ -178,7 +213,6 @@ async def button_handler(update: Update, context):
         
         reply_markup = InlineKeyboardMarkup(keyboard)
         active_players_count = len(game_state["players"])
-        
         current_num_display = game_state["current_number"] if game_state["current_number"] else "እየጠበቀ ነው..."
 
         await query.edit_message_text(
@@ -191,18 +225,15 @@ async def button_handler(update: Update, context):
             parse_mode="Markdown"
         )
     elif query.data.startswith("cell_"):
-        # ተጫዋቹ በካርዱ ላይ ቁጥር ሲነካ
         parts = query.data.split("_")
         if len(parts) == 2:
             num = int(parts[1])
-            # ቁጥሩ መጥራቱን ማረጋገጥ
             if num in game_state["called_numbers"]:
                 game_state["marked"][user_id].add(num)
                 await query.answer(f"ቁጥር {num} ተይዟል! ✅", show_alert=False)
             else:
                 await query.answer(f"ይህ ቁጥር ({num}) ገና አልተጠራም!", show_alert=True)
         
-        # ካርዱን መልሶ ማሳየት
         await button_handler_refresh(query, user_id)
 
     elif query.data == "claim_bingo":
@@ -213,11 +244,11 @@ async def button_handler(update: Update, context):
         if win_type:
             await query.edit_message_text(
                 f"🎉 **እንኳን ደስ አለዎት! አሸንፈዋል!** 🎉\n\n"
-                f"ተաղግቷል/የተዘጋው የጨዋታ አይነት: **{win_type}**\n"
+                f"የተረጋገጠው የጨዋታ አይነት: **{win_type}**\n"
                 f"ሽልማቱ ወደ ቀሪ ሂሳብዎ ተጨምሯል!",
                 parse_mode="Markdown"
             )
-            balances[user_id] += 500.0  # የሽልማት መጠን
+            balances[user_id] += 500.0
             game_state["winners"].append(user_id)
         else:
             await query.answer("እስካሁን የቢንጎ መስፈርት አልተሟላም! ተጨማሪ ቁጥሮችን ይጠብቁ።", show_alert=True)
@@ -229,6 +260,16 @@ async def button_handler_refresh(query, user_id):
     card = game_state["cards"][user_id]
     marked = game_state["marked"][user_id]
     keyboard = []
+    
+    header_row = [
+        InlineKeyboardButton("B", callback_data="noop"),
+        InlineKeyboardButton("I", callback_data="noop"),
+        InlineKeyboardButton("N", callback_data="noop"),
+        InlineKeyboardButton("G", callback_data="noop"),
+        InlineKeyboardButton("O", callback_data="noop")
+    ]
+    keyboard.append(header_row)
+
     for r_idx, row in enumerate(card):
         row_buttons = []
         for c_idx, val in enumerate(row):
@@ -237,7 +278,7 @@ async def button_handler_refresh(query, user_id):
                 cb_data = f"cell_free_{r_idx}_{c_idx}"
             else:
                 status = "✅" if val in marked else "⬜"
-                btn_text = f"{status} {val}"
+                btn_text = f"{status}{val}"
                 cb_data = f"cell_{val}"
             row_buttons.append(InlineKeyboardButton(btn_text, callback_data=cb_data))
         keyboard.append(row_buttons)
@@ -280,7 +321,7 @@ async def start_from_query(query, user_id):
 
 # ----------------- አውቶማቲክ ቁጥር ጥሪ የጀርባ ስራ (Background Game Loop) -----------------
 async def bingo_number_caller():
-    """ከ 1 እስከ 75 ያሉ ቁጥሮችን በየሰከንዱ እየጠራ ለተጫዋቾች ድምጽ/ማሳወቂያ የሚሰጥ ሉፕ"""
+    """ከ 1 እስከ 75 ያሉ ቁጥሮችን በየሰከንዱ እየጠራ ለተጫዋቾች ማሳወቂያ የሚሰጥ ሉፕ"""
     while True:
         await asyncio.sleep(5)  # በየ 5 ሰከንዱ ቁጥር ይጠራል
         if len(game_state["players"]) > 0:
@@ -290,20 +331,10 @@ async def bingo_number_caller():
                 game_state["called_numbers"].append(called)
                 game_state["current_number"] = called
                 logger.info(f"ቢንጎ ቁጥር ተጠራ: {called} (አጠቃላይ ተጫዋቾች: {len(game_state['players'])})")
-                
-                # ድምጽ የማስመሰል (Audio/Voice notification notice) ወይም መልእክት ማሰራጨት
-                for uid in list(game_state["players"]):
-                    try:
-                        # ቁጥር ሲጠራ የድምጽ/ኖቲፊኬሽን ማሳወቂያ መላክ ይቻላል
-                        pass
-                    except Exception as e:
-                        logger.error(f"Error notifying user {uid}: {e}")
             else:
-                # ቁጥሮች ካለቁ ጨዋታውን እንደገና ማስጀመር
                 game_state["called_numbers"] = []
                 game_state["current_number"] = None
 
-# የጀርባ ቁጥር ጥሪ ስራውን በሉፑ ማስጀመር
 asyncio.run_coroutine_threadsafe(bingo_number_caller(), main_loop)
 
 application.add_handler(CommandHandler("start", start))
@@ -315,7 +346,6 @@ def home():
 
 @app.route(f'/{TOKEN}', methods=['POST'])
 def webhook():
-    """ቴሌግራም መልእክት ሲልክ የሚቀበለው እና ወደ ቦቱ የሚያስተላልፈው ትክክለኛ ክፍል"""
     try:
         json_data = request.get_json(force=True)
         update = Update.de_json(json_data, application.bot)
