@@ -19,10 +19,12 @@ balances = {}          # {user_id: balance}
 user_phones = {}       # {user_id: phone_number}
 user_active_card = {}  # {user_id: currently viewed card index}
 
-MAX_PLAYERS = 500      # ከፍተኛ የተጫዋቾች ብዛት
+MAX_PLAYERS = 500      # ከፍተኛ የተጫዋቾች ብዛት (ከ 1 እስከ 500)
 GAME_COST = 10.0       # የጨዋታ/ካርርድ ዋጋ (10 ብር)
 
 game_state = {
+    "round": 9502,
+    "prize": 2408.00,
     "is_active": False,
     "called_numbers": [],
     "current_number": None,
@@ -107,14 +109,14 @@ async def start(update: Update, context):
     if user_id not in balances:
         balances[user_id] = 10.0
 
-    # ስልክ ቁጥር ካልተመዘገበ እንዲያጋራ መጠየቅ
     if user_id not in user_phones:
         contact_keyboard = [[KeyboardButton("📱 ስልክ ቁጥር አጋራ (Share Phone)", request_contact=True)]]
         reply_markup = ReplyKeyboardMarkup(contact_keyboard, resize_keyboard=True, one_time_keyboard=True)
         await update.message.reply_text(
-            "እንኳን ወደ በሽ በሽ ቢንጎ ቦት በደህና መጡ!\n\n"
+            "🎱 **BINGO HABESHA**\n\n"
             "ቦቱን ለመጠቀም እባክዎ ከታች ያለውን ቁልፍ በመጫን ስልክ ቁጥርዎን ያጋሩ።",
-            reply_markup=reply_markup
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
         )
         return
 
@@ -133,15 +135,18 @@ async def contact_handler(update: Update, context):
 
 async def show_main_menu_message(update_or_query, user_id, is_new_message=False):
     keyboard = [
-        [InlineKeyboardButton("🎮 ቢንጎ መጫወት (Play Bingo)", callback_data="play_bingo")],
-        [InlineKeyboardButton("💰 ቀሪ ሂሳብ (Balance)", callback_data="balance")],
-        [InlineKeyboardButton("📥 ገንዘብ ማስገባት (Deposit)", callback_data="deposit")],
-        [InlineKeyboardButton("📤 ገንዘብ ማውጣት (Withdraw)", callback_data="withdraw")]
+        [InlineKeyboardButton("🏠 Home (ዋና ገጽ)", callback_data="main_menu")],
+        [InlineKeyboardButton("🎟 Ticket (ካርድ መግዛት / መጫወት)", callback_data="play_bingo")],
+        [InlineKeyboardButton("💰 Wallet (የኪስ ቦርሳ)", callback_data="balance")],
+        [InlineKeyboardButton("📥 Deposit (ገንዘብ ማስገባት)", callback_data="deposit")],
+        [InlineKeyboardButton("📤 Withdraw (ገንዘብ ማውጣት)", callback_data="withdraw")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     text = (
-        f"እንኳን ወደ በሽ በሽ ቢንጎ ቦት በደህና መጡ!\n\n"
-        f"💳 የእርስዎ ቀሪ ሂሳብ: **{balances[user_id]} ብር**\n\n"
+        f"🎱 **BINGO HABESHA**\n\n"
+        f"💳 MAIN WALLET: **{balances[user_id]} ETB**\n"
+        f"🔄 Round (#ዙር): **#{game_state['round']}**\n"
+        f"🎁 Prize (ሽልማት): **{game_state['prize']} ETB**\n\n"
         f"ከታች ባሉት አማራጮች መምረጥ ይችላሉ፦"
     )
     
@@ -158,10 +163,13 @@ async def button_handler(update: Update, context):
     if user_id not in balances:
         balances[user_id] = 10.0
 
-    if query.data == "balance":
+    if query.data == "main_menu":
+        await show_main_menu_message(query, user_id, is_new_message=False)
+
+    elif query.data == "balance":
         keyboard = [[InlineKeyboardButton("🔙 ተመለስ", callback_data="main_menu")]]
         await query.edit_message_text(
-            f"💰 የእርስዎ ቀሪ ሂሳብ: **{balances[user_id]} ብር**", 
+            f"💰 **MAIN WALLET**\n\nቀሪ ሂሳብዎ: **{balances[user_id]} ETB**", 
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown"
         )
@@ -180,7 +188,7 @@ async def button_handler(update: Update, context):
         method_name = "ቴሌብር (Telebirr)" if query.data == "pay_telebirr" else "ሲቢኢ ብር (CBE Birr)"
         await query.edit_message_text(
             f"📱 **{method_name} አካውንት**:\n\n"
-            f"• ስም: በሽ በሽ ቢንጎ\n"
+            f"• ስም: ቢንጎ ሀበሻ (Bingo Habesha)\n"
             f"• ቁጥር: `0918719332`\n\n"
             f"ገንዘቡን ካስተላለፉ በኋላ የግብይቱን ማረጋገጫ (Screenshot) ለአድሚን ይላኩ።",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 ተመለስ", callback_data="deposit")]]),
@@ -189,20 +197,18 @@ async def button_handler(update: Update, context):
     elif query.data == "withdraw":
         keyboard = [[InlineKeyboardButton("🔙 ተመለስ", callback_data="main_menu")]]
         await query.edit_message_text(
-            f"📤 ገንዘብ ለማውጣት (Withdraw):\n\nየማውጫ ጥያቄዎ ተመዝግቧል። በቅርብ ጊዜ ወደ አካውንትዎ ይገባል።", 
+            f"📤 **ገንዘብ ማውጣት (Withdraw)**:\n\nየማውጫ ጥያቄዎ ተመዝግቧል። በቅርብ ጊዜ ወደ አካውንትዎ ይገባል።", 
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown"
         )
     elif query.data == "play_bingo":
-        # ተጫዋቾች ብዛት ከ 500 መብለጡን ማረጋገጥ
         if user_id not in game_state["players"] and len(game_state["players"]) >= MAX_PLAYERS:
-            await query.answer("⚠️ የጨዋታው አዳራሽ ሞልቷል (ከማክስ 500 ተጫዋቾች አልፈዋል)። እባክዎ የሚቀጥለውን ዙር ይጠብቁ።", show_alert=True)
+            await query.answer("⚠️ የጨዋታው አዳራሽ ሞልቷል (ከማክስ 500 ተጫዋቾች አልፈዋል)።", show_alert=True)
             return
 
-        # የመጀመሪያ ካርድ ከሌለ 10 ብር መቀነስ
         if user_id not in game_state["cards"] or len(game_state["cards"][user_id]) == 0:
             if balances[user_id] < GAME_COST:
-                await query.answer("⚠️ ቀሪ ሂሳብዎ በቂ አይደለም! ለመጫወት 10 ብር ያስፈልጋል። እባክዎ ገንዘብ ያስገቡ።", show_alert=True)
+                await query.answer("⚠️ ቀሪ ሂሳብዎ በቂ አይደለም! ካርድ ለመግዛት 10 ብር ያስፈልጋል።", show_alert=True)
                 return
             balances[user_id] -= GAME_COST
             game_state["players"].add(user_id)
@@ -217,7 +223,7 @@ async def button_handler(update: Update, context):
         if len(user_cards) >= 4:
             await query.answer("⚠️ እስከ 4 ካርቴላ ብቻ መያዝ ይችላሉ!", show_alert=True)
         elif balances[user_id] < GAME_COST:
-            await query.answer("⚠️ አዲስ ካርቴላ ለመጨመር ቀሪ ሂሳብዎ በቂ አይደለም (10 ብር ያስፈልጋል)።", show_alert=True)
+            await query.answer("⚠️ ቀሪ ሂሳብዎ በቂ አይደለም (10 ብር ያስፈልጋል)።", show_alert=True)
         else:
             balances[user_id] -= GAME_COST
             user_cards.append(generate_bingo_card())
@@ -234,7 +240,6 @@ async def button_handler(update: Update, context):
 
     elif query.data.startswith("cell_"):
         parts = query.data.split("_")
-        # format: cell_{card_idx}_{num}
         if len(parts) == 3 and parts[2].isdigit():
             card_idx = int(parts[1])
             num = int(parts[2])
@@ -253,22 +258,19 @@ async def button_handler(update: Update, context):
         win_type = check_win(card, marked)
         
         if win_type:
-            reward = 500.0
+            reward = game_state["prize"]
             balances[user_id] += reward
             game_state["winners"].append(user_id)
-            keyboard = [[InlineKeyboardButton("🔙 ወደ ዋናው ምናሌ", callback_data="main_menu")]]
+            keyboard = [[InlineKeyboardButton("🏠 ዋና ገጽ (Home)", callback_data="main_menu")]]
             await query.edit_message_text(
-                f"🎉 **እንኳን ደስ አለዎት! አሸንፈዋል!** 🎉\n\n"
+                f"🎉 **BINGO! WINNER! (አሸንፈዋል!)** 🎉\n\n"
                 f"የተረጋገጠው የጨዋታ አይነት: **{win_type}**\n"
-                f"🎁 ሽልማቱ **{reward} ብር** ወደ ቀሪ ሂሳብዎ ተጨምሯል!",
+                f"🎁 ሽልማቱ **{reward} ETB** ወደ ኪስ ቦርሳዎ ተጨምሯል!",
                 reply_markup=InlineKeyboardMarkup(keyboard),
                 parse_mode="Markdown"
             )
         else:
-            await query.answer("እስካሁን የቢንጎ መስፈርት አልተሟላም! ተጨማሪ ቁጥሮችን ይጠብቁ።", show_alert=True)
-
-    elif query.data == "main_menu":
-        await show_main_menu_message(query, user_id, is_new_message=False)
+            await query.answer("እስካሁን የቢንጎ መስፈርት አልተሟላም!", show_alert=True)
 
 async def render_bingo_board(query, user_id):
     cards = game_state["cards"].get(user_id, [])
@@ -291,7 +293,7 @@ async def render_bingo_board(query, user_id):
         card_switch_row.append(InlineKeyboardButton(btn_text, callback_data=f"switch_card_{idx}"))
     keyboard.append(card_switch_row)
 
-    # የ B-I-N-G-O ራስጌ
+    # B-I-N-G-O ራስጌ
     header_row = [
         InlineKeyboardButton("B", callback_data="noop"),
         InlineKeyboardButton("I", callback_data="noop"),
@@ -314,25 +316,26 @@ async def render_bingo_board(query, user_id):
             row_buttons.append(InlineKeyboardButton(btn_text, callback_data=cb_data))
         keyboard.append(row_buttons)
 
-    # ተጨማሪ ካርድ መግዣ አዝማም (ከ 4 በታች ከሆነ)
     if len(cards) < 4:
         keyboard.append([InlineKeyboardButton("➕ ተጨማሪ ካርድ ጨምር (10 ብር)", callback_data="add_card")])
 
     keyboard.append([InlineKeyboardButton("📢 ቢንጎ (Bingo!) አሳውቅ", callback_data="claim_bingo")])
-    keyboard.append([InlineKeyboardButton("🔙 ወደ ዋናው ምናሌ", callback_data="main_menu")])
+    keyboard.append([InlineKeyboardButton("🏠 ዋና ገጽ (Home)", callback_data="main_menu")])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     active_players_count = len(game_state["players"])
     current_num_display = game_state["current_number"] if game_state["current_number"] else "እየጠበቀ ነው..."
+    total_balls = f"{len(game_state['called_numbers'])}/75"
 
     try:
         await query.edit_message_text(
-            f"🎮 **የሀበሻ ቢንጎ ጨዋታ በሂደት ላይ ነው!**\n\n"
+            f"🎱 **BINGO HABESHA**\n\n"
+            f"🔹 Round (#ዙር): **#{game_state['round']}** | 💵 መሠረጫ: **{GAME_COST} ETB**\n"
+            f"🏆 Prize (ሽልማት): **{game_state['prize']} ETB** | ⚪ Balls (ኳስ): **{total_balls}**\n"
             f"🔊 የተጠራው ቁጥር: **{current_num_display}**\n"
-            f"👥 LIVE የተጫዋቾች ብዛት: **{active_players_count}/{MAX_PLAYERS}**\n"
-            f"💳 የእርስዎ ቀሪ ሂሳብ: **{balances[user_id]} ብር** | የያዙት ካርድ: **{active_idx + 1} / {len(cards)}**\n"
+            f"👥 የተጫዋቾች ብዛት: **{active_players_count}/{MAX_PLAYERS}**\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"ቁጥሮቹን እየመረጡ ይጫወቱ!",
+            f"🎟 የያዙት ካርድ: **{active_idx + 1} / {len(cards)}** (እስከ 4 ካርድ)",
             reply_markup=reply_markup,
             parse_mode="Markdown"
         )
@@ -353,6 +356,7 @@ async def bingo_number_caller():
             else:
                 game_state["called_numbers"] = []
                 game_state["current_number"] = None
+                game_state["round"] += 1
 
 asyncio.run_coroutine_threadsafe(bingo_number_caller(), main_loop)
 
@@ -362,7 +366,7 @@ application.add_handler(CallbackQueryHandler(button_handler))
 
 @app.route('/')
 def home():
-    return "Telegram Habesha Bingo Bot is running via Webhook on Render!"
+    return "Telegram Bingo Habesha Bot is running via Webhook on Render!"
 
 @app.route(f'/{TOKEN}', methods=['POST'])
 def webhook():
