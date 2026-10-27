@@ -3,381 +3,615 @@ import logging
 import asyncio
 import threading
 import random
+import sqlite3
+from contextlib import closing
 from flask import Flask, request
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+)
 
-# ሎጊንግ ማስተካከል
-logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Besh Besh Bingo â€” virtual-credit bingo bot.
+# Never put your Telegram bot token directly in source code.
+TOKEN = os.environ.get("TOKEN", "").strip()
+PUBLIC_URL = os.environ.get("RENDER_EXTERNAL_URL", "").strip().rstrip("/")
+WEBHOOK_SECRET_PATH = os.environ.get("WEBHOOK_SECRET_PATH", "").strip().strip("/")
+LIVE_CHAT_ID = os.environ.get("LIVE_CHAT_ID", "").strip()
+DATABASE_PATH = os.environ.get("DATABASE_PATH", "bingo.sqlite3")
+# Ensure the database folder exists (important when using a mounted disk such as /var/data).
+os.makedirs(os.path.dirname(os.path.abspath(DATABASE_PATH)), exist_ok=True)
 
-# የቦት ቶከን
-TOKEN = os.environ.get("TOKEN", "8389391544:AAH1id2OWlLoC92_oXDRgcOfEAP48Uh1oL0")
+MAX_PLAYERS = 500
+CARD_COST = 10
+STARTING_CREDITS = 100
+MAX_CARDS_PER_PLAYER = 4
+CALL_INTERVAL_SECONDS = 5  # live number is published every 5 seconds
 
-# የውሂብ ማከማቻዎች
-balances = {}          # {user_id: balance}
-user_phones = {}       # {user_id: phone_number}
-user_active_card = {}  # {user_id: currently viewed card index}
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger("besh-besh-bingo")
 
-MAX_PLAYERS = 500      # ከፍተኛ የተጫዋቾች ብዛት (ከ 1 እስከ 500)
-GAME_COST = 10.0       # የጨዋታ/ካርርድ ዋጋ (10 ብር)
+if not TOKEN:
+    raise RuntimeError("Set the TOKEN environment variable to your new Telegram bot token.")
+if not PUBLIC_URL:
+    logger.warning("RENDER_EXTERNAL_URL is not set; webhook setup will be skipped.")
 
+app = Flask(__name__)
+loop = asyncio.new_event_loop()
+application = Application.builder().token(TOKEN).build()
+
+# In-memory round state. User credits and cards are stored in SQLite.
+state_lock = threading.RLock()
 game_state = {
-    "round": 9502,
-    "prize": 2408.00,
+    "round": 1,
+    "prize": 0,
     "is_active": False,
     "called_numbers": [],
     "current_number": None,
     "players": set(),
-    "cards": {},       # {user_id: [card_matrix_1, card_matrix_2, ...]}
-    "marked": {},      # {user_id: [marked_set_1, marked_set_2, ...]}
-    "winners": []
+    "cards": {},       # user_id -> list of 5x5 card matrices
+    "marked": {},      # user_id -> list of sets
+    "winners": set(),  # one claim per user per round
 }
 
-app = Flask(__name__)
 
-# የጀርባ ሉፕ (Background Loop)
-main_loop = asyncio.new_event_loop()
+def db_connection():
+    conn = sqlite3.connect(DATABASE_PATH, timeout=20)
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            credits INTEGER NOT NULL DEFAULT 100
+        )"""
+    )
+    return conn
 
-def run_async_loop(loop):
-    asyncio.set_event_loop(loop)
-    loop.run_forever()
 
-t = threading.Thread(target=run_async_loop, args=(main_loop,), daemon=True)
-t.start()
+def ensure_user(user_id):
+    with closing(db_connection()) as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO users (user_id, credits) VALUES (?, ?)",
+            (user_id, STARTING_CREDITS),
+        )
+        conn.commit()
 
-application = Application.builder().token(TOKEN).build()
 
-async def setup_bot():
-    await application.initialize()
-    await application.start()
-    
-    RENDER_APP_NAME = os.environ.get("RENDER_EXTERNAL_URL", "https://beshbesh-bingo-bot-5.onrender.com")
-    WEBHOOK_URL = f"{RENDER_APP_NAME}/{TOKEN}"
-    
-    await application.bot.set_webhook(url=WEBHOOK_URL)
-    logger.info(f"Webhook set to {WEBHOOK_URL}")
+def get_credits(user_id):
+    ensure_user(user_id)
+    with closing(db_connection()) as conn:
+        row = conn.execute(
+            "SELECT credits FROM users WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        return int(row[0]) if row else 0
 
-asyncio.run_coroutine_threadsafe(setup_bot(), main_loop)
 
-# ----------------- ቢንጎ ካርድ (5x5) እና ሎጂክ -----------------
+def change_credits(user_id, delta):
+    ensure_user(user_id)
+    with closing(db_connection()) as conn:
+        conn.execute(
+            "UPDATE users SET credits = credits + ? WHERE user_id = ?",
+            (int(delta), user_id),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT credits FROM users WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        return int(row[0]) if row else 0
+
+
+def spend_credits(user_id, amount):
+    ensure_user(user_id)
+    with closing(db_connection()) as conn:
+        cur = conn.execute(
+            "UPDATE users SET credits = credits - ? "
+            "WHERE user_id = ? AND credits >= ?",
+            (amount, user_id, amount),
+        )
+        conn.commit()
+        return cur.rowcount == 1
+
+
 def generate_bingo_card():
-    cols = [
-        random.sample(range(1, 16), 5),   # B
-        random.sample(range(16, 31), 5),  # I
-        random.sample(range(31, 46), 5),  # N
-        random.sample(range(46, 61), 5),  # G
-        random.sample(range(61, 76), 5)   # O
+    columns = [
+        random.sample(range(1, 16), 5),
+        random.sample(range(16, 31), 5),
+        random.sample(range(31, 46), 5),
+        random.sample(range(46, 61), 5),
+        random.sample(range(61, 76), 5),
     ]
-    card = []
-    for r in range(5):
-        row = [cols[c][r] for c in range(5)]
-        card.append(row)
-    
+    card = [[columns[c][r] for c in range(5)] for r in range(5)]
     card[2][2] = "FREE"
     return card
 
-def check_win(card, marked_set):
+
+def check_win(card, marked):
     size = 5
     for r in range(size):
-        if all(card[r][c] == "FREE" or card[r][c] in marked_set for c in range(size)):
-            return "አግድም (Horizontal)"
-
+        if all(card[r][c] == "FREE" or card[r][c] in marked for c in range(size)):
+            return "áŠ áŒá‹µáˆ"
     for c in range(size):
-        if all(card[r][c] == "FREE" or card[r][c] in marked_set for r in range(size)):
-            return "ቀጥታ (Vertical)"
-
-    if all(card[i][i] == "FREE" or card[i][i] in marked_set for i in range(size)):
-        return "ሰያፍ (Diagonal)"
-    if all(card[i][size - 1 - i] == "FREE" or card[i][size - 1 - i] in marked_set for i in range(size)):
-        return "ሰያፍ (Diagonal)"
-
-    corners = [(0, 0), (0, size-1), (size-1, 0), (size-1, size-1)]
-    if all(card[r][c] in marked_set for r, c in corners):
-        return "ኮርነር (Corners)"
-
-    all_cells = [card[r][c] for r in range(size) for c in range(size) if card[r][c] != "FREE"]
-    if all(num in marked_set for num in all_cells):
-        return "ሙሉ ዝግ (Full House Bingo!)"
-
+        if all(card[r][c] == "FREE" or card[r][c] in marked for r in range(size)):
+            return "á‰€áŒ¥á‰³"
+    if all(card[i][i] == "FREE" or card[i][i] in marked for i in range(size)):
+        return "áˆ°á‹«á"
+    if all(card[i][size - 1 - i] == "FREE" or card[i][size - 1 - i] in marked for i in range(size)):
+        return "áˆ°á‹«á"
+    corners = [(0, 0), (0, 4), (4, 0), (4, 4)]
+    if all(card[r][c] == "FREE" or card[r][c] in marked for r, c in corners):
+        return "áŠ®áˆ­áŠáˆ­"
+    numbers = [card[r][c] for r in range(5) for c in range(5) if card[r][c] != "FREE"]
+    if all(number in marked for number in numbers):
+        return "áˆ™áˆ‰ áŠ«áˆ­á‹µ"
     return None
 
-# ----------------- የቦት ትዕዛዞች እና መቆጣጠሪያዎች -----------------
 
-async def start(update: Update, context):
-    user_id = update.effective_user.id
-    if user_id not in balances:
-        balances[user_id] = 10.0
+def main_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("ðŸŽŸ á‰¢áŠ•áŒŽ á‰°áŒ«á‹ˆá‰µ", callback_data="play")],
+        [InlineKeyboardButton("ðŸ’³ á‹¨áŒ¨á‹‹á‰³ áŠáŒ¥á‰¦á‰¼", callback_data="balance")],
+        [InlineKeyboardButton("â„¹ï¸ á‹¨áŒ¨á‹‹á‰³ áˆ˜áˆ˜áˆªá‹«", callback_data="rules")],
+    ])
 
-    if user_id not in user_phones:
-        contact_keyboard = [[KeyboardButton("📱 ስልክ ቁጥር አጋራ (Share Phone)", request_contact=True)]]
-        reply_markup = ReplyKeyboardMarkup(contact_keyboard, resize_keyboard=True, one_time_keyboard=True)
-        await update.message.reply_text(
-            "🎱 **BINGO HABESHA**\n\n"
-            "ቦቱን ለመጠቀም እባክዎ ከታች ያለውን ቁልፍ በመጫን ስልክ ቁጥርዎን ያጋሩ።",
-            reply_markup=reply_markup,
-            parse_mode="Markdown"
-        )
-        return
 
-    await show_main_menu_message(update, user_id, is_new_message=True)
-
-async def contact_handler(update: Update, context):
-    user_id = update.effective_user.id
-    if update.message.contact:
-        phone_number = update.message.contact.phone_number
-        user_phones[user_id] = phone_number
-
-    if user_id not in balances:
-        balances[user_id] = 10.0
-
-    await show_main_menu_message(update, user_id, is_new_message=True)
-
-async def show_main_menu_message(update_or_query, user_id, is_new_message=False):
-    keyboard = [
-        [InlineKeyboardButton("🏠 Home (ዋና ገጽ)", callback_data="main_menu")],
-        [InlineKeyboardButton("🎟 Ticket (ካርድ መግዛት / መጫወት)", callback_data="play_bingo")],
-        [InlineKeyboardButton("💰 Wallet (የኪስ ቦርሳ)", callback_data="balance")],
-        [InlineKeyboardButton("📥 Deposit (ገንዘብ ማስገባት)", callback_data="deposit")],
-        [InlineKeyboardButton("📤 Withdraw (ገንዘብ ማውጣት)", callback_data="withdraw")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    text = (
-        f"🎱 **BINGO HABESHA**\n\n"
-        f"💳 MAIN WALLET: **{balances[user_id]} ETB**\n"
-        f"🔄 Round (#ዙር): **#{game_state['round']}**\n"
-        f"🎁 Prize (ሽልማት): **{game_state['prize']} ETB**\n\n"
-        f"ከታች ባሉት አማራጮች መምረጥ ይችላሉ፦"
+def main_text(user_id):
+    return (
+        "ðŸŽ± *BESH BESH BINGO*\n\n"
+        f"ðŸ’³ á‹¨áŒ¨á‹‹á‰³ áŠáŒ¥á‰¦á‰½: *{get_credits(user_id)}*\n"
+        f"ðŸ”„ á‹™áˆ­: *#{game_state['round']}*\n"
+        f"ðŸ† áˆáŠ“á‰£á‹Š áˆ½áˆáˆ›á‰µ: *{game_state['prize']} áŠáŒ¥á‰¥*\n\n"
+        "áŠ¨á‰³á‰½ áŠ«áˆ‰á‰µ áŠ áˆ›áˆ«áŒ®á‰½ á‹­áˆáˆ¨áŒ¡á¢\n"
+        "_á‹­áˆ… áˆµáˆªá‰µ á‹¨áŒ¨á‹‹á‰³ áŠáŒ¥á‰¥ á‰¥á‰» á‹­áŒ á‰€áˆ›áˆá¢_"
     )
-    
-    if is_new_message:
-        await update_or_query.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
-    else:
-        await update_or_query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
 
-async def button_handler(update: Update, context):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
 
-    if user_id not in balances:
-        balances[user_id] = 10.0
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    ensure_user(user_id)
+    await update.effective_message.reply_text(
+        main_text(user_id), reply_markup=main_keyboard(), parse_mode="Markdown"
+    )
 
-    if query.data == "main_menu":
-        await show_main_menu_message(query, user_id, is_new_message=False)
 
-    elif query.data == "balance":
-        keyboard = [[InlineKeyboardButton("🔙 ተመለስ", callback_data="main_menu")]]
-        await query.edit_message_text(
-            f"💰 **MAIN WALLET**\n\nቀሪ ሂሳብዎ: **{balances[user_id]} ETB**", 
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown"
-        )
-    elif query.data == "deposit":
-        keyboard = [
-            [InlineKeyboardButton("📱 ቴሌብር (Telebirr)", callback_data="pay_telebirr")],
-            [InlineKeyboardButton("🏦 ሲቢኢ ብር (CBE Birr)", callback_data="pay_cbe")],
-            [InlineKeyboardButton("🔙 ተመለስ", callback_data="main_menu")]
-        ]
-        await query.edit_message_text(
-            "📥 **ገንዘብ ማስገባት (Deposit)**\n\nእባክዎ ገንዘብ ሊያስገቡበት የሚፈልጉትን የክፍያ አማራጭ ይምረጡ (ቁጥር: `0918719332`):",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown"
-        )
-    elif query.data in ["pay_telebirr", "pay_cbe"]:
-        method_name = "ቴሌብር (Telebirr)" if query.data == "pay_telebirr" else "ሲቢኢ ብር (CBE Birr)"
-        await query.edit_message_text(
-            f"📱 **{method_name} አካውንት**:\n\n"
-            f"• ስም: ቢንጎ ሀበሻ (Bingo Habesha)\n"
-            f"• ቁጥር: `0918719332`\n\n"
-            f"ገንዘቡን ካስተላለፉ በኋላ የግብይቱን ማረጋገጫ (Screenshot) ለአድሚን ይላኩ።",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 ተመለስ", callback_data="deposit")]]),
-            parse_mode="Markdown"
-        )
-    elif query.data == "withdraw":
-        keyboard = [[InlineKeyboardButton("🔙 ተመለስ", callback_data="main_menu")]]
-        await query.edit_message_text(
-            f"📤 **ገንዘብ ማውጣት (Withdraw)**:\n\nየማውጫ ጥያቄዎ ተመዝግቧል። በቅርብ ጊዜ ወደ አካውንትዎ ይገባል።", 
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown"
-        )
-    elif query.data == "play_bingo":
-        if user_id not in game_state["players"] and len(game_state["players"]) >= MAX_PLAYERS:
-            await query.answer("⚠️ የጨዋታው አዳራሽ ሞልቷል (ከማክስ 500 ተጫዋቾች አልፈዋል)።", show_alert=True)
-            return
+async def show_menu(query, user_id):
+    await query.edit_message_text(
+        main_text(user_id), reply_markup=main_keyboard(), parse_mode="Markdown"
+    )
 
-        if user_id not in game_state["cards"] or len(game_state["cards"][user_id]) == 0:
-            if balances[user_id] < GAME_COST:
-                await query.answer("⚠️ ቀሪ ሂሳብዎ በቂ አይደለም! ካርድ ለመግዛት 10 ብር ያስፈልጋል።", show_alert=True)
-                return
-            balances[user_id] -= GAME_COST
-            game_state["players"].add(user_id)
-            game_state["cards"][user_id] = [generate_bingo_card()]
-            game_state["marked"][user_id] = [set()]
-            user_active_card[user_id] = 0
 
-        await render_bingo_board(query, user_id)
-
-    elif query.data == "add_card":
-        user_cards = game_state["cards"].get(user_id, [])
-        if len(user_cards) >= 4:
-            await query.answer("⚠️ እስከ 4 ካርቴላ ብቻ መያዝ ይችላሉ!", show_alert=True)
-        elif balances[user_id] < GAME_COST:
-            await query.answer("⚠️ ቀሪ ሂሳብዎ በቂ አይደለም (10 ብር ያስፈልጋል)።", show_alert=True)
-        else:
-            balances[user_id] -= GAME_COST
-            user_cards.append(generate_bingo_card())
-            game_state["marked"][user_id].append(set())
-            user_active_card[user_id] = len(user_cards) - 1
-            await query.answer("✅ አዲስ ካርቴላ ተጨምሯል!", show_alert=False)
-        
-        await render_bingo_board(query, user_id)
-
-    elif query.data.startswith("switch_card_"):
-        card_idx = int(query.data.split("_")[2])
-        user_active_card[user_id] = card_idx
-        await render_bingo_board(query, user_id)
-
-    elif query.data.startswith("cell_"):
-        parts = query.data.split("_")
-        if len(parts) == 3 and parts[2].isdigit():
-            card_idx = int(parts[1])
-            num = int(parts[2])
-            if num in game_state["called_numbers"]:
-                game_state["marked"][user_id][card_idx].add(num)
-                await query.answer(f"ቁጥር {num} ተይዟል! ✅", show_alert=False)
-            else:
-                await query.answer(f"ይህ ቁጥር ({num}) ገና አልተጠራም!", show_alert=True)
-        
-        await render_bingo_board(query, user_id)
-
-    elif query.data == "claim_bingo":
-        active_idx = user_active_card.get(user_id, 0)
-        card = game_state["cards"].get(user_id, [[]])[active_idx]
-        marked = game_state["marked"].get(user_id, [set()])[active_idx]
-        win_type = check_win(card, marked)
-        
-        if win_type:
-            reward = game_state["prize"]
-            balances[user_id] += reward
-            game_state["winners"].append(user_id)
-            keyboard = [[InlineKeyboardButton("🏠 ዋና ገጽ (Home)", callback_data="main_menu")]]
-            await query.edit_message_text(
-                f"🎉 **BINGO! WINNER! (አሸንፈዋል!)** 🎉\n\n"
-                f"የተረጋገጠው የጨዋታ አይነት: **{win_type}**\n"
-                f"🎁 ሽልማቱ **{reward} ETB** ወደ ኪስ ቦርሳዎ ተጨምሯል!",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode="Markdown"
+def build_board_payload(user_id):
+    """Build the current personal card view for button replies and live updates."""
+    with state_lock:
+        cards = game_state["cards"].get(user_id, [])
+        marks = game_state["marked"].get(user_id, [])
+        if not cards:
+            return (
+                "áŠ«áˆ­á‹µ áŠ áˆá‹Žá‰µáˆá¢ áŠ¥á‰£áŠ­á‹Ž áŠ¨á‹‹áŠ“á‹ áˆœáŠ‘ áŒ¨á‹‹á‰³á‹áŠ• á‹­áŒ€áˆáˆ©á¢",
+                main_keyboard(),
+                False,
             )
-        else:
-            await query.answer("እስካሁን የቢንጎ መስፈርት አልተሟላም!", show_alert=True)
 
-async def render_bingo_board(query, user_id):
-    cards = game_state["cards"].get(user_id, [])
-    marked_list = game_state["marked"].get(user_id, [])
-    active_idx = user_active_card.get(user_id, 0)
-    
-    if active_idx >= len(cards):
-        active_idx = 0
-        user_active_card[user_id] = 0
-
-    card = cards[active_idx]
-    marked = marked_list[active_idx]
+        idx = min(max(0, contextless_active_card(user_id)), len(cards) - 1)
+        card = cards[idx]
+        marked = marks[idx]
+        called_count = len(game_state["called_numbers"])
+        current = game_state["current_number"]
+        player_count = len(game_state["players"])
+        round_num = game_state["round"]
+        prize = game_state["prize"]
+        called = list(game_state["called_numbers"])
 
     keyboard = []
-    
-    # ካርቴላዎች መቀያየሪያ ቁልፎች (እስከ 4 ካርዶች)
-    card_switch_row = []
-    for idx in range(len(cards)):
-        btn_text = f"{'🟢' if idx == active_idx else '⚪'} ካርድ {idx + 1}"
-        card_switch_row.append(InlineKeyboardButton(btn_text, callback_data=f"switch_card_{idx}"))
-    keyboard.append(card_switch_row)
-
-    # B-I-N-G-O ራስጌ
-    header_row = [
-        InlineKeyboardButton("B", callback_data="noop"),
-        InlineKeyboardButton("I", callback_data="noop"),
-        InlineKeyboardButton("N", callback_data="noop"),
-        InlineKeyboardButton("G", callback_data="noop"),
-        InlineKeyboardButton("O", callback_data="noop")
-    ]
-    keyboard.append(header_row)
-
-    for r_idx, row in enumerate(card):
+    keyboard.append([
+        InlineKeyboardButton(
+            ("ðŸŸ¢ " if i == idx else "âšª ") + f"áŠ«áˆ­á‹µ {i + 1}",
+            callback_data=f"switch:{i}",
+        )
+        for i in range(len(cards))
+    ])
+    keyboard.append([
+        InlineKeyboardButton(letter, callback_data="noop")
+        for letter in ["B", "I", "N", "G", "O"]
+    ])
+    for r, row in enumerate(card):
         row_buttons = []
-        for c_idx, val in enumerate(row):
-            if val == "FREE":
-                btn_text = "⭐ FREE"
-                cb_data = f"cell_{active_idx}_free_{r_idx}_{c_idx}"
+        for c, value in enumerate(row):
+            if value == "FREE":
+                label = "â­ FREE"
             else:
-                status = "✅" if val in marked else "⬜"
-                btn_text = f"{status}{val}"
-                cb_data = f"cell_{active_idx}_{val}"
-            row_buttons.append(InlineKeyboardButton(btn_text, callback_data=cb_data))
+                label = ("âœ…" if value in marked else "â¬œ") + str(value)
+            row_buttons.append(
+                InlineKeyboardButton(label, callback_data=f"cell:{idx}:{value}")
+            )
         keyboard.append(row_buttons)
 
-    if len(cards) < 4:
-        keyboard.append([InlineKeyboardButton("➕ ተጨማሪ ካርድ ጨምር (10 ብር)", callback_data="add_card")])
+    extras = []
+    if len(cards) < MAX_CARDS_PER_PLAYER:
+        extras.append(InlineKeyboardButton(f"âž• áŠ«áˆ­á‹µ (+{CARD_COST} áŠáŒ¥á‰¥)", callback_data="add"))
+    extras.append(InlineKeyboardButton("ðŸ”„ áŠ á‹µáˆµ", callback_data="refresh"))
+    keyboard.append(extras)
+    keyboard.append([InlineKeyboardButton("ðŸ“¢ BINGO! áŠ áˆ³á‹á‰…", callback_data="claim")])
+    keyboard.append([InlineKeyboardButton("ðŸ  á‹‹áŠ“ áˆœáŠ‘", callback_data="menu")])
 
-    keyboard.append([InlineKeyboardButton("📢 ቢንጎ (Bingo!) አሳውቅ", callback_data="claim_bingo")])
-    keyboard.append([InlineKeyboardButton("🏠 ዋና ገጽ (Home)", callback_data="main_menu")])
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    active_players_count = len(game_state["players"])
-    current_num_display = game_state["current_number"] if game_state["current_number"] else "እየጠበቀ ነው..."
-    total_balls = f"{len(game_state['called_numbers'])}/75"
+    text = (
+        "ðŸŽ± *BESH BESH BINGO*\n\n"
+        f"ðŸ”„ á‹™áˆ­: *#{round_num}* | ðŸŽŸ áŠ«áˆ­á‹µ: *{idx + 1}/{len(cards)}*\n"
+        f"ðŸ† áˆáŠ“á‰£á‹Š áˆ½áˆáˆ›á‰µ: *{prize} áŠáŒ¥á‰¥*\n"
+        f"ðŸ”Š á‹¨áˆ˜áŒ¨áˆ¨áˆ» á‰áŒ¥áˆ­: *{current if current is not None else 'áŒˆáŠ“ áŠ áˆá‰°áŒ áˆ«áˆ'}*\n"
+        f"âšª á‹¨á‰°áŒ áˆ© áŠ³áˆ¶á‰½: *{called_count}/75*\n"
+        f"ðŸ‘¥ á‰°áŒ«á‹‹á‰¾á‰½: *{player_count}/{MAX_PLAYERS}*\n\n"
+        "á‰áŒ¥áˆ­ áŠ¨á‰°áŒ áˆ« á‰ áŠ‹áˆ‹ á‰ áŠ«áˆ­á‹µá‹Ž áˆ‹á‹­ á‹«áˆˆá‹áŠ• á‰áŒ¥áˆ­ á‹­áŒ«áŠ‘á¢\n"
+        f"ðŸ“‹ á‹¨á‰°áŒ áˆ© á‰áŒ¥áˆ®á‰½: {', '.join(map(str, called[-15:])) or 'â€”'}"
+    )
+    return text, InlineKeyboardMarkup(keyboard), True
 
+
+async def render_board(query, user_id):
+    text, markup, has_card = build_board_payload(user_id)
+    await query.edit_message_text(text, reply_markup=markup, parse_mode="Markdown")
+    if has_card and query.message:
+        # Keep the bot's personal card message address so it can be edited on each live call.
+        private_board_messages[user_id] = (query.message.chat_id, query.message.message_id)
+
+
+# Per-user active card selection.
+active_cards = {}
+live_message_id = None  # one shared live-board message in the configured Telegram group/channel
+private_board_messages = {}  # user_id -> (private chat_id, personal card message_id)
+private_update_lock = asyncio.Lock()
+
+
+def contextless_active_card(user_id):
+    return active_cards.get(user_id, 0)
+
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+    ensure_user(user_id)
+    data = query.data or ""
+
+    if data == "noop":
+        await query.answer()
+        return
+    if data in ("menu", "balance", "rules"):
+        await query.answer()
+        if data == "balance":
+            await query.edit_message_text(
+                f"ðŸ’³ *á‹¨áŒ¨á‹‹á‰³ áŠáŒ¥á‰¦á‰½á‹Ž: {get_credits(user_id)}*\n\n"
+                "áŠáŒ¥á‰¦á‰¹ áˆˆá‹šáˆ… áŒ¨á‹‹á‰³ á‰¥á‰» áŠ“á‰¸á‹á¢",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("ðŸ”™ á‹‹áŠ“ áˆœáŠ‘", callback_data="menu")]]
+                ),
+                parse_mode="Markdown",
+            )
+        elif data == "rules":
+            await query.edit_message_text(
+                "ðŸ“˜ *á‹¨áŒ¨á‹‹á‰³ áˆ˜áˆ˜áˆªá‹«*\n\n"
+                f"â€¢ áŠ«áˆ­á‹µ á‹‹áŒ‹: {CARD_COST} áˆáŠ“á‰£á‹Š áŠáŒ¥á‰¥\n"
+                "â€¢ á‰áŒ¥áˆ®á‰½ á‰ áˆ«áˆµ-áˆ°áˆ­ á‹­áŒ áˆ«áˆ‰á¢\n"
+                "â€¢ á‹¨á‰°áŒ áˆ« á‰áŒ¥áˆ­ á‰ áŠ«áˆ­á‹µá‹Ž áˆ‹á‹­ á‹­áŒ«áŠ‘á¢\n"
+                "â€¢ áŠ áŒá‹µáˆá£ á‰€áŒ¥á‰³á£ áˆ°á‹«á á‹ˆá‹­áˆ áŠ®áˆ­áŠáˆ­ áˆ²áˆžáˆ‹ BINGO á‹­áŒ«áŠ‘á¢\n"
+                "â€¢ áŠ¥áˆµáŠ¨ 4 áŠ«áˆ­á‹¶á‰½ áˆ˜á‹«á‹ á‹­á‰½áˆ‹áˆ‰á¢\n"
+                "â€¢ áŠ¥á‹áŠá‰°áŠ› áŒˆáŠ•á‹˜á‰¥ á‹ˆá‹­áˆ áŠ­áá‹« áŠ á‹­áŠ«á‰°á‰µáˆá¢",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("ðŸ”™ á‹‹áŠ“ áˆœáŠ‘", callback_data="menu")]]
+                ),
+                parse_mode="Markdown",
+            )
+        else:
+            await show_menu(query, user_id)
+        return
+
+    if data == "play":
+        with state_lock:
+            if user_id not in game_state["players"] and len(game_state["players"]) >= MAX_PLAYERS:
+                await query.answer("á‹¨áŒ¨á‹‹á‰³á‹ á‰¦á‰³ áˆžáˆá‰·áˆá¢", show_alert=True)
+                return
+            has_card = bool(game_state["cards"].get(user_id))
+            if not has_card:
+                if not spend_credits(user_id, CARD_COST):
+                    await query.answer("á‰ á‰‚ áŠáŒ¥á‰¥ á‹¨áˆˆá‹Žá‰µáˆá¢", show_alert=True)
+                    return
+                game_state["cards"][user_id] = [generate_bingo_card()]
+                game_state["marked"][user_id] = [set()]
+                game_state["players"].add(user_id)
+                active_cards[user_id] = 0
+                game_state["prize"] += CARD_COST
+                game_state["is_active"] = True
+        await query.answer()
+        await publish_live_board()
+        await render_board(query, user_id)
+        return
+
+    if data == "add":
+        with state_lock:
+            cards = game_state["cards"].get(user_id, [])
+            if len(cards) >= MAX_CARDS_PER_PLAYER:
+                await query.answer("áŠ¥áˆµáŠ¨ 4 áŠ«áˆ­á‹¶á‰½ á‰¥á‰» á‹­á‹«á‹™á¢", show_alert=True)
+                return
+            if not spend_credits(user_id, CARD_COST):
+                await query.answer("á‰ á‰‚ áŠáŒ¥á‰¥ á‹¨áˆˆá‹Žá‰µáˆá¢", show_alert=True)
+                return
+            cards.append(generate_bingo_card())
+            game_state["marked"][user_id].append(set())
+            active_cards[user_id] = len(cards) - 1
+            game_state["prize"] += CARD_COST
+        await query.answer("áŠ«áˆ­á‹µ á‰°áŒ¨áˆáˆ¯áˆá¢")
+        await publish_live_board()
+        await render_board(query, user_id)
+        return
+
+    if data.startswith("switch:"):
+        try:
+            idx = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        if 0 <= idx < len(game_state["cards"].get(user_id, [])):
+            active_cards[user_id] = idx
+        await query.answer()
+        await render_board(query, user_id)
+        return
+
+    if data in ("refresh",):
+        await query.answer()
+        await render_board(query, user_id)
+        return
+
+    if data.startswith("cell:"):
+        parts = data.split(":")
+        if len(parts) != 3:
+            return
+        try:
+            idx = int(parts[1])
+        except ValueError:
+            return
+        if idx >= len(game_state["cards"].get(user_id, [])) or idx < 0:
+            await query.answer("á‹­áˆ… áŠ«áˆ­á‹µ áŠ á‹­áŒˆáŠáˆá¢", show_alert=True)
+            return
+        value = parts[2]
+        if value == "FREE":
+            await query.answer("FREE áˆ´áˆ á‰ áˆ«áˆ± á‹­á‰†áŒ áˆ«áˆá¢")
+            return
+        try:
+            number = int(value)
+        except ValueError:
+            return
+        with state_lock:
+            if number not in game_state["called_numbers"]:
+                await query.answer("á‹­áˆ… á‰áŒ¥áˆ­ áŒˆáŠ“ áŠ áˆá‰°áŒ áˆ«áˆá¢", show_alert=True)
+                return
+            game_state["marked"][user_id][idx].add(number)
+            active_cards[user_id] = idx
+        await query.answer(f"á‰áŒ¥áˆ­ {number} á‰°áˆ˜áˆ­áŒ§áˆá¢")
+        await render_board(query, user_id)
+        return
+
+    if data == "claim":
+        with state_lock:
+            cards = game_state["cards"].get(user_id, [])
+            marks = game_state["marked"].get(user_id, [])
+            idx = active_cards.get(user_id, 0)
+            if not cards or idx >= len(cards) or idx >= len(marks):
+                await query.answer("áˆ˜áŒ€áˆ˜áˆªá‹« áŠ«áˆ­á‹µ á‹­á‹«á‹™á¢", show_alert=True)
+                return
+            if user_id in game_state["winners"]:
+                await query.answer("á‰ á‹šáˆ… á‹™áˆ­ áŠ áˆµá‰€á‹µáˆ˜á‹ áŠ áˆ¸áŠ•áˆá‹‹áˆá¢", show_alert=True)
+                return
+            win_type = check_win(cards[idx], marks[idx])
+            if not win_type:
+                await query.answer("á‹¨á‰¢áŠ•áŒŽ áˆ˜áˆµáˆáˆ­á‰µ áŒˆáŠ“ áŠ áˆá‰°áˆŸáˆ‹áˆá¢", show_alert=True)
+                return
+            reward = max(0, game_state["prize"])
+            change_credits(user_id, reward)
+            # Close this round and clear its cards so the next game starts cleanly.
+            game_state["round"] += 1
+            game_state["prize"] = 0
+            game_state["is_active"] = False
+            game_state["called_numbers"] = []
+            game_state["current_number"] = None
+            game_state["players"] = set()
+            game_state["cards"] = {}
+            game_state["marked"] = {}
+            game_state["winners"] = set()
+            active_cards.clear()
+            private_board_messages.pop(user_id, None)
+            await publish_live_board()
+            await query.edit_message_text(
+                "ðŸŽ‰ *BINGO! áŠ áˆ¸áŠ•áˆá‹‹áˆ!*\n\n"
+                f"ðŸ… á‹¨áŠ áˆ¸áŠ“áŠáŠá‰µ áŠ á‹­áŠá‰µ: *{win_type}*\n"
+                f"ðŸŽ á‹¨á‰°áŒ¨áˆ˜áˆ¨á‹ áˆáŠ“á‰£á‹Š áˆ½áˆáˆ›á‰µ: *{reward} áŠáŒ¥á‰¥*\n"
+                f"ðŸ’³ áŠ á‹²áˆµ á‰€áˆª áŠáŒ¥á‰¥: *{get_credits(user_id)}*",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("ðŸ  á‹‹áŠ“ áˆœáŠ‘", callback_data="menu")]]
+                ),
+                parse_mode="Markdown",
+            )
+            await publish_private_boards()
+        return
+
+
+async def publish_live_board():
+    """Update the shared Telegram group/channel live-board message."""
+    global live_message_id
+    if not LIVE_CHAT_ID:
+        return
+    with state_lock:
+        round_num = game_state["round"]
+        current = game_state["current_number"]
+        called = list(game_state["called_numbers"])
+        players = len(game_state["players"])
+        prize = game_state["prize"]
+        active = game_state["is_active"]
+    text = (
+        "ðŸŽ± *BESH BESH BINGO â€” LIVE*\n\n"
+        f"ðŸ”„ á‹™áˆ­: *#{round_num}*\n"
+        f"ðŸ”Š áŠ áˆáŠ• á‹¨á‰°áŒ áˆ«á‹ á‰áŒ¥áˆ­: *{current if current is not None else 'áŒˆáŠ“ áŠ áˆá‰°áŒ áˆ«áˆ'}*\n"
+        f"ðŸ“‹ á‹¨á‰°áŒ áˆ© á‰áŒ¥áˆ®á‰½ ({len(called)}/75): {', '.join(map(str, called)) or 'â€”'}\n"
+        f"ðŸ‘¥ á‰°áŒ«á‹‹á‰¾á‰½: *{players}/{MAX_PLAYERS}*\n"
+        f"ðŸ† áˆáŠ“á‰£á‹Š áˆ½áˆáˆ›á‰µ: *{prize} áŠáŒ¥á‰¥*\n"
+        f"ðŸ“¡ áˆáŠ”á‰³: *{'LIVE' if active else 'á‰°áŒ á‰£á‰£á‰‚'}*\n\n"
+        "á‰ áŒáˆ á‰¦á‰µ á‹áˆµáŒ¥ áŠ«áˆ­á‹µá‹ŽáŠ• á‹­áŠ¨á‰³á‰°áˆ‰á¢"
+    )
     try:
-        await query.edit_message_text(
-            f"🎱 **BINGO HABESHA**\n\n"
-            f"🔹 Round (#ዙር): **#{game_state['round']}** | 💵 መሠረጫ: **{GAME_COST} ETB**\n"
-            f"🏆 Prize (ሽልማት): **{game_state['prize']} ETB** | ⚪ Balls (ኳስ): **{total_balls}**\n"
-            f"🔊 የተጠራው ቁጥር: **{current_num_display}**\n"
-            f"👥 የተጫዋቾች ብዛት: **{active_players_count}/{MAX_PLAYERS}**\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
-            f"🎟 የያዙት ካርድ: **{active_idx + 1} / {len(cards)}** (እስከ 4 ካርድ)",
-            reply_markup=reply_markup,
-            parse_mode="Markdown"
-        )
+        chat_id = int(LIVE_CHAT_ID)
+        if live_message_id is None:
+            message = await application.bot.send_message(
+                chat_id=chat_id, text=text, parse_mode="Markdown"
+            )
+            live_message_id = message.message_id
+        else:
+            try:
+                await application.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=live_message_id,
+                    text=text,
+                    parse_mode="Markdown",
+                )
+            except Exception as exc:
+                # Re-create the shared board if the message was deleted or is no longer editable.
+                logger.warning("Could not edit live board; creating a new one: %s", exc)
+                message = await application.bot.send_message(
+                    chat_id=chat_id, text=text, parse_mode="Markdown"
+                )
+                live_message_id = message.message_id
     except Exception:
-        pass
+        logger.exception("Failed to publish live board. Check LIVE_CHAT_ID and bot permissions.")
 
-# ----------------- አውቶማቲክ ቁጥር ጥሪ የጀርባ ስራ -----------------
-async def bingo_number_caller():
+
+async def publish_private_boards():
+    """Edit each participating player's private card message with the latest called numbers.
+
+    Updates are throttled to reduce Telegram API flood limits. With 500 players, a full
+    refresh can take some time; the next number is called after the refresh completes.
+    """
+    async with private_update_lock:
+        with state_lock:
+            recipients = list(private_board_messages.items())
+        for user_id, (chat_id, message_id) in recipients:
+            # Players whose round has ended no longer have a card to refresh.
+            text, markup, has_card = build_board_payload(user_id)
+            if not has_card:
+                try:
+                    await application.bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        text="ðŸŽ± *BESH BESH BINGO*\n\ná‹™áˆ© á‰°áŒ áŠ“á‰‹áˆá¢ áŠ¥áŠ•á‹°áŒˆáŠ“ áˆˆáˆ˜áŒ«á‹ˆá‰µ á‹‹áŠ“ áˆœáŠ‘ á‹­áŒ«áŠ‘á¢",
+                        reply_markup=main_keyboard(),
+                        parse_mode="Markdown",
+                    )
+                except Exception as exc:
+                    logger.debug("Could not clear ended private board for user %s: %s", user_id, exc)
+                private_board_messages.pop(user_id, None)
+                await asyncio.sleep(0.05)
+                continue
+            try:
+                await application.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=text,
+                    reply_markup=markup,
+                    parse_mode="Markdown",
+                )
+            except Exception as exc:
+                message = str(exc).lower()
+                if "message is not modified" in message:
+                    pass
+                elif "message to edit not found" in message or "chat not found" in message:
+                    private_board_messages.pop(user_id, None)
+                    logger.info("Removed unavailable private board for user %s", user_id)
+                else:
+                    logger.warning("Could not refresh private board for user %s: %s", user_id, exc)
+            # Stay below Telegram's approximate global message-edit throughput.
+            await asyncio.sleep(0.05)
+
+
+async def number_caller():
     while True:
-        await asyncio.sleep(5)
-        if len(game_state["players"]) > 0:
-            available_nums = [n for n in range(1, 76) if n not in game_state["called_numbers"]]
-            if available_nums:
-                called = random.choice(available_nums)
-                game_state["called_numbers"].append(called)
-                game_state["current_number"] = called
-                logger.info(f"ቢንጎ ቁጥር ተጠራ: {called} (አጠቃላይ ተጫዋቾች: {len(game_state['players'])})")
+        await asyncio.sleep(CALL_INTERVAL_SECONDS)
+        with state_lock:
+            if not game_state["players"] or not game_state["is_active"]:
+                continue
+            available = [
+                n for n in range(1, 76)
+                if n not in game_state["called_numbers"]
+            ]
+            if available:
+                number = random.choice(available)
+                game_state["called_numbers"].append(number)
+                game_state["current_number"] = number
+                logger.info("Round %s called number %s", game_state["round"], number)
             else:
+                # Start a fresh round when all 75 numbers have been called.
+                game_state["round"] += 1
                 game_state["called_numbers"] = []
                 game_state["current_number"] = None
-                game_state["round"] += 1
+                game_state["winners"] = set()
+                game_state["cards"] = {}
+                game_state["marked"] = {}
+                game_state["players"] = set()
+                active_cards.clear()
+                game_state["prize"] = 0
+                game_state["is_active"] = False
+        await publish_live_board()
+        await publish_private_boards()
 
-asyncio.run_coroutine_threadsafe(bingo_number_caller(), main_loop)
 
-application.add_handler(CommandHandler("start", start))
-application.add_handler(MessageHandler(filters.CONTACT, contact_handler))
-application.add_handler(CallbackQueryHandler(button_handler))
+async def initialize_bot():
+    await application.initialize()
+    await application.start()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(button_handler))
+    loop.create_task(number_caller())
 
-@app.route('/')
+    if PUBLIC_URL:
+        path = WEBHOOK_SECRET_PATH or TOKEN
+        webhook_url = f"{PUBLIC_URL}/{path}"
+        await application.bot.set_webhook(url=webhook_url)
+        logger.info("Webhook configured.")
+    else:
+        logger.warning("Webhook not configured because RENDER_EXTERNAL_URL is missing.")
+
+
+def run_loop():
+    asyncio.set_event_loop(loop)
+    loop.run_forever()
+
+
+threading.Thread(target=run_loop, daemon=True).start()
+asyncio.run_coroutine_threadsafe(initialize_bot(), loop)
+
+
+@app.get("/")
 def home():
-    return "Telegram Bingo Habesha Bot is running via Webhook on Render!"
+    return "Besh Besh Bingo bot is running.", 200
 
-@app.route(f'/{TOKEN}', methods=['POST'])
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "bot": "Besh Besh Bingo"}, 200
+
+
+@app.post("/" + (WEBHOOK_SECRET_PATH or TOKEN))
 def webhook():
+    if not request.is_json:
+        return "Expected JSON", 400
     try:
-        json_data = request.get_json(force=True)
-        update = Update.de_json(json_data, application.bot)
-        asyncio.run_coroutine_threadsafe(application.process_update(update), main_loop)
-    except Exception as e:
-        logger.error(f"Error processing update: {e}")
-    return "OK", 200
+        update = Update.de_json(request.get_json(force=True), application.bot)
+        asyncio.run_coroutine_threadsafe(application.process_update(update), loop)
+        return "OK", 200
+    except Exception:
+        logger.exception("Could not process Telegram update")
+        return "Error", 500
 
-if __name__ == '__main__':
-    PORT = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=PORT)
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", "10000"))
+    app.run(host="0.0.0.0", port=port)
