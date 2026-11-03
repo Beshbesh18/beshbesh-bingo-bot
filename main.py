@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Besh Besh Bingo — Telegram bot + Telegram Mini App
-Updated with Flash Bingo style (1-600 numbers pool and advanced UI layout).
+Updated with Classic 5x5 (1-75) Cards and 1-600 Master Called Numbers.
 
 Environment variables:
   TOKEN                  Required Telegram bot token
@@ -47,13 +47,12 @@ ADMIN_IDS = {
 DATABASE_PATH = os.environ.get("DATABASE_PATH", "bingo.sqlite3")
 os.makedirs(os.path.dirname(os.path.abspath(DATABASE_PATH)), exist_ok=True)
 
-MAX_PLAYERS = 500
 CARD_COST = 10
 STARTING_CREDITS = 100
 MAX_CARDS_PER_PLAYER = 4
-MAX_NUMBERS = 600  # Besh Besh / Flash style range up to 600
-CALL_INTERVAL_SECONDS = 3
-ROUND_PAUSE_SECONDS = 6
+MAX_MASTER_NUMBERS = 600  # Master called numbers pool range up to 600
+CALL_INTERVAL_SECONDS = 3  # 3 seconds per number call
+PREPARATION_SECONDS = 50   # 50 seconds preparation timer before round starts
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -133,15 +132,6 @@ def update_credits(user_id, delta, is_win=False):
         row = con.execute(f"SELECT credits, win_credits FROM users WHERE user_id=?", (int(user_id),)).fetchone()
         return row["credits"] if row else 0
 
-def set_language(user_id, language):
-    with closing(db()) as con:
-        con.execute("UPDATE users SET language=? WHERE user_id=?", (language, int(user_id)))
-        con.commit()
-
-def get_language(user_id):
-    row = get_user(user_id)
-    return row["language"] if row else "am"
-
 init_db()
 
 # ------------------------------ Game state ---------------------------
@@ -150,18 +140,20 @@ def fresh_game():
         "round": 1, "prize": 0, "is_active": False,
         "called_numbers": [], "current_number": None,
         "players": set(), "cards": {}, "marked": {}, "winner_ids": set(),
-        "started_at": time.time(),
+        "round_started_at": time.time(),
+        "prep_ends_at": time.time() + PREPARATION_SECONDS,
     }
 
 game_state = fresh_game()
 
 def make_card():
+    # Classic 5x5 Bingo Card with numbers 1 to 75 (B:1-15, I:16-30, N:31-45, G:46-60, O:61-75)
     columns = [
-        random.sample(range(1, 121), 5),
-        random.sample(range(121, 241), 5),
-        random.sample(range(241, 361), 5),
-        random.sample(range(361, 481), 5),
-        random.sample(range(481, 601), 5),
+        random.sample(range(1, 16), 5),
+        random.sample(range(16, 31), 5),
+        random.sample(range(31, 46), 5),
+        random.sample(range(46, 61), 5),
+        random.sample(range(61, 76), 5),
     ]
     card = [[columns[c][r] for c in range(5)] for r in range(5)]
     card[2][2] = "FREE"
@@ -192,7 +184,7 @@ def card_has_bingo(card, marked):
 
 def call_next_number():
     with game_lock:
-        remaining = [n for n in range(1, MAX_NUMBERS + 1) if n not in game_state["called_numbers"]]
+        remaining = [n for n in range(1, MAX_MASTER_NUMBERS + 1) if n not in game_state["called_numbers"]]
         if not remaining:
             return None
         number = random.choice(remaining)
@@ -203,15 +195,22 @@ def call_next_number():
 def auto_caller_loop():
     while True:
         try:
-            time.sleep(CALL_INTERVAL_SECONDS)
+            time.sleep(1)
+            now = time.time()
             with game_lock:
-                active = game_state["is_active"]
-            if not active:
-                continue
-            number = call_next_number()
-            if number is None or len(game_state["called_numbers"]) >= MAX_NUMBERS:
-                with game_lock:
-                    game_state["is_active"] = False
+                if not game_state["is_active"]:
+                    # Check if preparation time (50 seconds) has passed to start calling numbers
+                    if now >= game_state["prep_ends_at"] and len(game_state["players"]) > 0:
+                        game_state["is_active"] = True
+                else:
+                    # Active game calling numbers every CALL_INTERVAL_SECONDS (3s)
+                    if not hasattr(auto_caller_loop, "_last_call"):
+                        auto_caller_loop._last_call = 0
+                    if now - auto_caller_loop._last_call >= CALL_INTERVAL_SECONDS:
+                        auto_caller_loop._last_call = now
+                        number = call_next_number()
+                        if number is None or len(game_state["called_numbers"]) >= MAX_MASTER_NUMBERS:
+                            game_state["is_active"] = False
         except Exception:
             logger.exception("Auto caller failed")
             time.sleep(1)
@@ -227,7 +226,8 @@ def reset_round():
         game_state["cards"] = {}
         game_state["marked"] = {}
         game_state["winner_ids"] = set()
-        game_state["started_at"] = time.time()
+        game_state["round_started_at"] = time.time()
+        game_state["prep_ends_at"] = time.time() + PREPARATION_SECONDS
 
 def active_player_count():
     return len(game_state["players"])
@@ -235,7 +235,7 @@ def active_player_count():
 # ------------------------------ Localization & Handlers -------------------------
 TEXT = {
     "am": {
-        "welcome": "🎰 እንኳን ደህና መጡ ወደ በሽ በሽ ቢንጎ!\n\nአጓጊ እና ፈጣን የቢንጎ ጨዋታ መድረክ።",
+        "welcome": "🎰 እንኳን ደህና መጡ ወደ በሽ በሽ ቢንጎ!\n\nክላሲክ 5x5 ካርቴላዎች እና 1-600 ማስተር ቁጥሮች ያሉት አጓጊ ጨዋታ።",
         "play": "🎮 በሽ በሽ ቢንጎ ጨዋታ",
         "balance": "💰 ብር ሂሳብ",
         "rules": "📜 ሕግ እና ደንቦች",
@@ -246,42 +246,19 @@ TEXT = {
         "admin": "🛡 አድሚን",
         "choose": "ከታች ያሉትን አማራጮች ይምረጡ።",
         "balance_msg": "💰 የኪስ ሂሳብዎ:\nPlay Wallet: {credits} ETB\nWin Wallet: {win_credits} ETB",
-        "rules_msg": "📜 ሕጎች\n• ካርድ ዋጋ: 10 ብር\n• ከ 1 እስከ 600 ቁጥሮች ያሉት ሰሌዳ\n• በተጠሩ ቁጥሮች ላይ ምልክት በማድረግ BINGO ይበሉ።",
-        "no_credit": "በቂ ሂሳብ የለዎትምም።",
-        "bought": "✅ ካርድ ተገዝቷል።",
-        "language_set": "ቋንቋው ወደ አማርኛ ተስተካክሏል።",
-    },
-    "en": {
-        "welcome": "🎰 Welcome to Besh Besh Bingo!\n\nFast and exciting bingo gaming platform.",
-        "play": "🎮 Play Besh Besh Bingo",
-        "balance": "💰 Balance",
-        "rules": "📜 Rules",
-        "wallet": "💳 Wallet",
-        "rank": "🏆 Rank",
-        "language": "🌐 Language",
-        "support": "Help",
-        "admin": "🛡 Admin",
-        "choose": "Choose an option below.",
-        "balance_msg": "💰 Your balance:\nPlay Wallet: {credits} ETB\nWin Wallet: {win_credits} ETB",
-        "rules_msg": "📜 Rules\n• Card cost: 10 ETB\n• Numbers range from 1 to 600\n• Mark called numbers and claim BINGO.",
-        "no_credit": "You do not have enough credits.",
-        "bought": "✅ Card purchased.",
-        "language_set": "Language changed to English.",
+        "rules_msg": "📜 ሕጎች\n• ካርድ ዋጋ: 10 ብር\n• እያንዳንዱ ካርቴላ 5x5 (ከ1 እስከ 75) ቁጥሮች አሉት\n• ማስተር ቁጥሮች ከ1 እስከ 600 ይጠራሉ\n• የ50 ሰከንድ የዝግጅት ሰዓት አለው።",
     },
 }
 
 def tr(user_id, key, **kwargs):
-    lang = get_language(user_id)
-    return TEXT.get(lang, TEXT["am"]).get(key, TEXT["am"].get(key, key)).format(**kwargs)
+    return TEXT["am"].get(key, key).format(**kwargs)
 
 def main_keyboard(user_id):
-    lang = get_language(user_id)
-    t = TEXT.get(lang, TEXT["am"])
     return ReplyKeyboardMarkup([
-        [KeyboardButton(t["play"]), KeyboardButton(t["balance"])],
-        [KeyboardButton(t["wallet"]), KeyboardButton(t["rank"])],
-        [KeyboardButton(t["rules"]), KeyboardButton(t["language"])],
-        [KeyboardButton(t["support"])],
+        [KeyboardButton("🎮 በሽ በሽ ቢንጎ ጨዋታ"), KeyboardButton("💰 ብር ሂሳብ")],
+        [KeyboardButton("💳 Wallet / ኪስ ቦርሳ"), KeyboardButton("🏆 ደረጃ")],
+        [KeyboardButton("📜 ሕግ እና ደንቦች"), KeyboardButton("🌐 ቋንቋ / Language")],
+        [KeyboardButton("ជំនួយ")],
     ], resize_keyboard=True)
 
 def webapp_url():
@@ -303,101 +280,51 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text(text, reply_markup=markup)
     await update.effective_message.reply_text("Besh Besh Bingo 🎰", reply_markup=main_keyboard(user.id))
 
-async def language_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    ensure_user(user.id, user.username, user.first_name)
-    keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("አማርኛ", callback_data="lang:am"),
-        InlineKeyboardButton("English", callback_data="lang:en"),
-    ]])
-    await update.effective_message.reply_text("ቋንቋ ይምረጡ / Choose language:", reply_markup=keyboard)
-
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     ensure_user(user.id, user.username, user.first_name)
     msg = (update.effective_message.text or "").strip()
-    lang = get_language(user.id)
-    t = TEXT.get(lang, TEXT["am"])
-    if msg in (t["play"], "🎮 በሽ በሽ ቢንጎ ጨዋታ", "🎮 Play Besh Besh Bingo"):
+    if msg in ("🎮 በሽ በሽ ቢንጎ ጨዋታ", "Play Besh Besh Bingo"):
         markup = start_keyboard()
         if markup:
             await update.effective_message.reply_text("Besh Besh Bingo 🎰", reply_markup=markup)
         else:
-            await update.effective_message.reply_text("Set RENDER_EXTERNAL_URL to enable the Mini App.")
-    elif msg in (t["balance"], "💰 ብር ሂሳብ", "💰 Balance"):
+            await update.effective_message.reply_text("Set RENDER_EXTERNAL_URL.")
+    elif msg in ("💰 ብር ሂሳብ", "Balance"):
         row = get_user(user.id)
         await update.effective_message.reply_text(tr(user.id, "balance_msg", credits=row["credits"], win_credits=row["win_credits"]))
-    elif msg in (t["rules"], "📜 ሕግ እና ደንቦች", "📜 Rules"):
+    elif msg in ("📜 ሕግ እና ደንቦች", "Rules"):
         await update.effective_message.reply_text(tr(user.id, "rules_msg"))
-    elif msg in (t["wallet"], "💳 Wallet / ኪስ ቦርሳ"):
-        await update.effective_message.reply_text(
-            "💳 Wallet\nTelebirr: 0918719332 · Enyew\nCBE Birr: 0918719332 · Enyew\n\n"
-            "ክፍያ ከፈጸሙ በኋላ በ Mini App ውስጥ የክፍያ ማረጋገጫ ቁጥርዎን ይላኩ።")
-    elif msg in (t["rank"], "🏆 ደረጃ", "🏆 Rank"):
+    elif msg in ("💳 Wallet / ኪስ ቦርሳ",):
+        await update.effective_message.reply_text("💳 Wallet\nTelebirr: 0918719332 · Enyew\nCBE Birr: 0918719332 · Enyew")
+    elif msg in ("🏆 ደረጃ",):
         with closing(db()) as con:
-            rows = con.execute("SELECT username, first_name, credits, win_credits FROM users ORDER BY win_credits DESC LIMIT 10").fetchall()
-        lines = ["🏆 Top Besh Besh Players"]
+            rows = con.execute("SELECT username, first_name, win_credits FROM users ORDER BY win_credits DESC LIMIT 10").fetchall()
+        lines = ["🏆 Top Players"]
         for i, r in enumerate(rows, 1):
             name = ("@" + r["username"]) if r["username"] else (r["first_name"] or "Player")
             lines.append(f"{i}. {name} — {r['win_credits']} ETB")
         await update.effective_message.reply_text("\n".join(lines))
-    elif msg in (t["language"], "🌐 ቋንቋ / Language"):
-        await language_command(update, context)
-    elif msg in (t["support"], "ជំនួយ", "Help"):
-        await update.effective_message.reply_text("ជំនួយ / Help\nContact administrator for support.")
     else:
-        await update.effective_message.reply_text(tr(user.id, "choose"), reply_markup=main_keyboard(user.id))
-
-async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if user.id not in ADMIN_IDS:
-        await update.effective_message.reply_text("🚫 Unauthorized.")
-        return
-    if PUBLIC_URL:
-        keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("🛡 Open Besh Besh Admin Panel", web_app=WebAppInfo(url=PUBLIC_URL + "/admin"))
-        ]])
-        await update.effective_message.reply_text("🛡 Admin panel", reply_markup=keyboard)
-    else:
-        await update.effective_message.reply_text("Admin panel unavailable until RENDER_EXTERNAL_URL is configured.")
-
-async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    ensure_user(user_id, query.from_user.username, query.from_user.first_name)
-    if query.data.startswith("lang:"):
-        lang = query.data.split(":", 1)[1]
-        if lang in ("am", "en"):
-            set_language(user_id, lang)
-            await query.edit_message_text(TEXT[lang]["language_set"])
+        await update.effective_message.reply_text("አማራጭ ይምረጡ:", reply_markup=main_keyboard(user.id))
 
 bot_application.add_handler(CommandHandler("start", start))
-bot_application.add_handler(CommandHandler("language", language_command))
-bot_application.add_handler(CommandHandler("admin", admin_command))
-bot_application.add_handler(CallbackQueryHandler(callback_handler))
 bot_application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-# ---------------------------- Mini App auth ---------------------------
+# ------------------------------ Mini App auth & API ---------------------------
 def validate_telegram_init_data(init_data):
-    if not init_data:
-        return None
+    if not init_data: return None
     try:
         pairs = dict(parse_qsl(init_data, keep_blank_values=True))
         received_hash = pairs.pop("hash", None)
-        if not received_hash:
-            return None
+        if not received_hash: return None
         data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
         secret_key = hmac.new(b"WebAppData", TOKEN.encode(), hashlib.sha256).digest()
         calculated = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(calculated, received_hash):
-            return None
+        if not hmac.compare_digest(calculated, received_hash): return None
         user_data = json.loads(pairs.get("user", "{}"))
-        if not user_data.get("id"):
-            return None
-        return user_data
+        return user_data if user_data.get("id") else None
     except Exception:
-        logger.exception("Failed to validate initData")
         return None
 
 def api_user():
@@ -406,9 +333,8 @@ def api_user():
         ensure_user(data["id"], data.get("username", ""), data.get("first_name", ""))
         return data
     if os.environ.get("ALLOW_DEMO_MODE", "").lower() == "true":
-        demo_id = int(request.headers.get("X-Demo-User", "999999"))
-        ensure_user(demo_id, "demo", "Demo Player")
-        return {"id": demo_id, "username": "demo", "first_name": "Demo Player"}
+        ensure_user(999999, "demo", "Demo Player")
+        return {"id": 999999, "username": "demo", "first_name": "Demo Player"}
     return None
 
 def api_admin():
@@ -418,22 +344,23 @@ def api_admin():
 def json_error(message, status=400):
     return jsonify({"error": message}), status
 
-# ------------------------------ HTML & JS Assets (Besh Besh / Flash Style) ---------------------------
+# ------------------------------ HTML & JS Assets ---------------------------
 INDEX_HTML = r"""<!doctype html>
-<html lang="am"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="theme-color" content="#06180d"><title>Besh Besh Bingo</title><script src="https://telegram.org/js/telegram-web-app.js"></script><link rel="stylesheet" href="/static/style.css"></head>
+<html lang="am"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Besh Besh Bingo</title><script src="https://telegram.org/js/telegram-web-app.js"></script><link rel="stylesheet" href="/static/style.css"></head>
 <body><main class="app-shell">
 <header class="topbar">
-  <div class="brand-info"><div class="eyebrow">BESH BESH BINGO 🎰</div><h1 id="round-title">ዙር #1</h1></div>
+  <div><div class="eyebrow">BESH BESH BINGO 🎰</div><h1 id="round-title">ዙር #1</h1></div>
   <div class="top-scores">
     <div class="score-box"><span>PLAY</span><strong id="play-bal">0.00</strong></div>
     <div class="score-box win"><span>WIN</span><strong id="win-bal">0.00</strong></div>
     <div class="current-call-badge" id="current">—</div>
   </div>
 </header>
+<div id="prep-timer" style="background:#142d19;border:1px solid #39d66f;padding:8px;border-radius:10px;text-align:center;font-size:12px;margin-bottom:10px">ጨዋታው ሊጀመር: <b>50 ሰከንድ</b> ይቀራል</div>
 
 <section class="game-panel">
   <div class="section-header">
-    <h2>BESH BESH · BINGO (1 - 600)</h2>
+    <h2>MASTER BOARD (1 - 600)</h2>
     <span class="card-count-pill" id="card-count">የተያዙ ካርዶች: 0</span>
   </div>
   <div class="master-grid" id="master-grid"></div>
@@ -451,7 +378,7 @@ INDEX_HTML = r"""<!doctype html>
   <p class="hint">Telebirr / CBE Birr: 0918719332 · Enyew</p>
   <select id="deposit-method"><option>Telebirr</option><option>CBE Birr</option></select>
   <input id="deposit-amount" type="number" placeholder="የክፍያ መጠን (ብር)">
-  <input id="deposit-reference" placeholder="የክፍያ ማረጋገጫ ቁጥር (Transaction ID)">
+  <input id="deposit-reference" placeholder="የክፍያ ማረጋገጫ ቁጥር">
   <button id="send-deposit" class="primary-btn">የክፍያ ጥያቄ ላክ</button>
 </div>
 
@@ -467,14 +394,8 @@ INDEX_HTML = r"""<!doctype html>
 </nav>
 </main><div id="toast"></div><script src="/static/app.js"></script></body></html>"""
 
-ADMIN_HTML = r"""<!doctype html><html lang="am"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Besh Besh Bingo Admin</title><link rel="stylesheet" href="/static/style.css"><style>.admin{max-width:700px;margin:auto;padding:16px}.req{background:#0b2113;border:1px solid #20552d;padding:12px;border-radius:10px;margin-bottom:10px}</style></head>
-<body class="admin"><header><h1>🛡 በሽ በሽ ቢንጎ አድሚን ፓነል</h1><button id="refresh" class="primary-btn">⟳ አዲስ</button></header>
-<section style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:15px 0">
-  <div class="req"><span>ተጫዋቾች</span><strong id="u-count">—</strong></div>
-  <div class="req"><span>ጠቅላላ ብር</span><strong id="t-cred">—</strong></div>
-  <div class="req"><span>በመጠባበቅ ላይ</span><strong id="p-count">—</strong></div>
-</section>
-<h2>የክፍያ ጥያቄዎች</h2><div id="req-list">ጭነት ላይ...</div><script src="/static/admin.js"></script></body></html>"""
+ADMIN_HTML = r"""<!doctype html><html lang="am"><head><meta charset="utf-8"><title>Admin</title><link rel="stylesheet" href="/static/style.css"></head>
+<body style="padding:16px"><h1>🛡 አድሚን ፓነል</h1><div id="req-list">ጭነት ላይ...</div><script src="/static/admin.js"></script></body></html>"""
 
 STYLE_CSS = r""":root{color-scheme:dark;--bg:#041509;--panel:#0b2113;--panel2:#102d19;--line:#20552d;--text:#f4f7f4;--muted:#a3b8a8;--gold:#ffe629;--teal:#39d66f}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);font-family:system-ui,sans-serif;color:var(--text);padding-bottom:70px}
@@ -488,15 +409,16 @@ STYLE_CSS = r""":root{color-scheme:dark;--bg:#041509;--panel:#0b2113;--panel2:#1
 .game-panel,.wallet-section,.rank-section{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:12px;margin-bottom:12px}
 .section-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;font-size:13px}
 .card-count-pill{background:var(--panel2);padding:4px 8px;border-radius:6px;border:1px solid var(--line);font-size:11px;color:var(--teal)}
-.master-grid{display:grid;grid-template-columns:repeat(10,1fr);gap:3px;max-height:220px;overflow-y:auto;background:#06180d;padding:6px;border-radius:10px;border:1px solid var(--line)}
-.m-cell{aspect-ratio:1;background:var(--panel2);border-radius:4px;font-size:9px;display:grid;place-items:center;font-weight:700;color:var(--muted)}
+.master-grid{display:grid;grid-template-columns:repeat(10,1fr);gap:3px;max-height:160px;overflow-y:auto;background:#06180d;padding:6px;border-radius:10px;border:1px solid var(--line)}
+.m-cell{aspect-ratio:1;background:var(--panel2);border-radius:3px;font-size:8px;display:grid;place-items:center;font-weight:700;color:var(--muted)}
 .m-cell.called{background:var(--teal);color:#041509;font-weight:900}
 .cards-section{display:flex;flex-direction:column;gap:10px;margin-bottom:12px}
 .bingo-card{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:10px}
 .card-title{font-size:12px;font-weight:bold;margin-bottom:6px;color:var(--gold)}
 .card-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:4px}
-.c-cell{aspect-ratio:1;background:#06180d;border:1px solid var(--line);border-radius:6px;font-size:11px;font-weight:800;display:grid;place-items:center;cursor:pointer}
-.c-cell.free{background:#483308;color:var(--gold)}
+.c-cell{aspect-ratio:1;background:#06180d;border:1px solid var(--line);border-radius:6px;font-size:12px;font-weight:800;display:grid;place-items:center;cursor:pointer}
+.c-cell.head{background:#173d22;color:var(--gold);font-size:10px;cursor:default}
+.c-cell.free{background:#483308;color:var(--gold);font-size:10px}
 .c-cell.called{border-color:var(--teal)}
 .c-cell.marked{background:#114624;color:var(--teal);border-color:var(--teal)}
 .actions-row{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:16px}
@@ -522,18 +444,29 @@ document.getElementById('win-bal').textContent=(model.win_credits||0).toFixed(2)
 document.getElementById('current').textContent=model.current_number??'—';
 document.getElementById('card-count').textContent='የተያዙ ካርዶች: '+model.cards.length;
 
+// Prep timer display
+const timerBox=document.getElementById('prep-timer');
+if(!model.is_active && model.time_left>0){
+  timerBox.style.display='block';
+  timerBox.innerHTML=`ጨዋታው ሊጀመር: <b>${model.time_left} ሰከንድ</b> ይቀራል`;
+}else{
+  timerBox.style.display='none';
+}
+
 // Master Grid 1 to 600
 const calledSet=new Set(model.called_numbers);
 let mg=document.getElementById('master-grid');mg.innerHTML='';
 for(let i=1;i<=600;i++){const d=document.createElement('div');d.className='m-cell'+(calledSet.has(i)?' called':'');d.textContent=i;mg.appendChild(d);}
 
-// Cards view
+// Cards view (5x5 classic with B-I-N-G-O header)
 let cc=document.getElementById('cards-container');cc.innerHTML='';
 model.cards.forEach((card,idx)=>{
   let marked=new Set(model.marked[idx]||['FREE']);
   let box=document.createElement('div');box.className='bingo-card';
-  box.innerHTML=`<div class="card-title">ካርድ #${idx+1}</div>`;
+  box.innerHTML=`<div class="card-title">ካርድ #${idx+1} (1-75)</div>`;
   let grid=document.createElement('div');grid.className='card-grid';
+  ['B','I','N','G','O'].forEach(h=>{let d=document.createElement('div');d.className='c-cell head';d.textContent=h;grid.appendChild(d);});
+  
   card.forEach((row,r)=>row.forEach((n,c)=>{
     let btn=document.createElement('button');btn.className='c-cell';
     if(n==='FREE'){btn.classList.add('free');btn.textContent='★';}
@@ -548,7 +481,7 @@ model.cards.forEach((card,idx)=>{
   box.appendChild(grid);cc.appendChild(box);
 });
 }
-async function refresh(){try{model=await api('/api/miniapp/game');render();}catch(e){toast(e.message)}}
+async function refresh(){try{model=await api('/api/miniapp/game');render();}catch(e){}}
 async function action(path,body={}){try{const d=await api(path,'POST',body);toast(d.message||'ተሳካ');await refresh()}catch(e){toast(e.message)}}
 
 window.switchTab=function(tab){
@@ -556,13 +489,14 @@ window.switchTab=function(tab){
     document.querySelector(`.nav-btn[data-tab="${t}"]`).classList.toggle('active',t===tab);
   });
   document.querySelector('.game-panel').style.display=tab==='bingo'?'block':'none';
+  document.getElementById('prep-timer').style.display=tab==='bingo'?'block':'none';
   document.getElementById('cards-container').style.display=tab==='bingo'?'flex':'none';
   document.querySelector('.actions-row').style.display=tab==='bingo'?'grid':'none';
   document.getElementById('wallet-section').style.display=tab==='wallet'?'block':'none';
   document.getElementById('rank-section').style.display=tab==='rank'?'block':'none';
   if(tab==='rank')loadRank();
 }
-async function loadRank(){try{const d=await api('/api/miniapp/rank');document.getElementById('rank-list').innerHTML=d.rows.map((r,i)=>`<div style="padding:6px;border-bottom:1px solid #20552d">${i+1}. ${r.name} — <b>${r.credits} ETB</b></div>`).join('');}catch(e){toast(e.message)}}
+async function loadRank(){try{const d=await api('/api/miniapp/rank');document.getElementById('rank-list').innerHTML=d.rows.map((r,i)=>`<div style="padding:6px;border-bottom:1px solid #20552d">${i+1}. ${r.name} — <b>${r.credits} ETB</b></div>`).join('');}catch(e){}}
 
 document.getElementById('buy-card').onclick=()=>action('/api/miniapp/buy-card');
 document.getElementById('claim').onclick=()=>action('/api/miniapp/claim');
@@ -571,20 +505,16 @@ document.getElementById('send-deposit').onclick=()=>{
   if(!amount||reference.length<3){toast('ትክክለኛ መረጃ ያስገቡ');return;}
   action('/api/miniapp/deposit-request',{amount,method,reference}).then(()=>{document.getElementById('deposit-reference').value='';})
 };
-refresh();setInterval(refresh,4000);
+refresh();setInterval(refresh,1500);
 })();"""
 
 ADMIN_JS = r"""async function load(){
 const r=await fetch('/api/admin/overview',{headers:{'X-Telegram-Init-Data':window.Telegram?.WebApp?.initData||''}});
 const d=await r.json();
-document.getElementById('u-count').textContent=d.users_count;
-document.getElementById('t-cred').textContent=d.total_credits;
-document.getElementById('p-count').textContent=d.pending_count;
-document.getElementById('req-list').innerHTML=d.requests.map(r=>`<div class="req"><b>#${r.id} · ${r.amount} ብር (${r.method})</b><p>User: ${r.user_id} | Ref: ${r.reference}</p><button onclick="review(${r.id},'approve')" style="background:#39d66f;border:0;padding:6px 12px;border-radius:6px;font-weight:bold">አጽድቅ</button></div>`).join('');
+document.getElementById('req-list').innerHTML=d.requests.map(r=>`<div style="background:#0b2113;padding:10px;border-radius:8px;margin-bottom:8px"><b>#${r.id} · ${r.amount} ብር (${r.method})</b><button onclick="review(${r.id},'approve')" style="background:#39d66f;border:0;padding:6px 12px;border-radius:6px;font-weight:bold">አጽድቅ</button></div>`).join('');
 }
 async function review(id,decision){await fetch(`/api/admin/deposit/${id}/review`,{method:'POST',headers:{'Content-Type':'application/json','X-Telegram-Init-Data':window.Telegram?.WebApp?.initData||''},body:JSON.stringify({decision})});load();}
-document.getElementById('refresh').onclick=load;load();
-"""
+load();"""
 
 # ------------------------------ Flask API Routes -------------------------
 @app.route("/static/style.css")
@@ -610,9 +540,11 @@ def api_miniapp_game():
     with game_lock:
         cards = all_cards(user["id"])
         marked_dict = {str(idx): list(marked_set(user["id"], idx)) for idx in range(len(cards))}
+        time_left = max(0, int(game_state["prep_ends_at"] - time.time()))
         return jsonify({
             "round": game_state["round"], "prize": game_state["prize"],
-            "is_active": game_state["is_active"], "called_numbers": game_state["called_numbers"],
+            "is_active": game_state["is_active"], "time_left": time_left,
+            "called_numbers": game_state["called_numbers"],
             "current_number": game_state["current_number"], "player_count": active_player_count(),
             "credits": row["credits"] if row else 100, "win_credits": row["win_credits"] if row else 0,
             "cards": cards, "marked": marked_dict
@@ -623,14 +555,13 @@ def api_miniapp_buy_card():
     user = api_user()
     if not user: return json_error("Unauthorized", 401)
     row = get_user(user["id"])
-    if (row["credits"] if row else 100) < CARD_COST: return json_error("Not enough credits")
+    if (row["credits"] if row else 100) < CARD_COST: return json_error("በቂ ሂሳብ የለዎትም")
     with game_lock:
         cards = all_cards(user["id"])
-        if len(cards) >= MAX_CARDS_PER_PLAYER: return json_error("Max 4 cards allowed")
+        if len(cards) >= MAX_CARDS_PER_PLAYER: return json_error("እስከ 4 ካርዶች ብቻ መያዝ ይቻላል")
         cards.append(make_card())
         game_state["players"].add(user["id"])
         game_state["prize"] += CARD_COST
-        if not game_state["is_active"]: game_state["is_active"] = True
     update_credits(user["id"], -CARD_COST)
     return jsonify({"message": "ካርድ ተገዝቷል!"})
 
@@ -643,7 +574,7 @@ def api_miniapp_mark():
     with game_lock:
         cards = all_cards(user["id"])
         if idx is None or idx < 0 or idx >= len(cards): return json_error("Invalid card")
-        if num != "FREE" and num not in game_state["called_numbers"]: return json_error("Number not called yet")
+        if num != "FREE" and num not in game_state["called_numbers"]: return json_error("ቁጥሩ ገና አልተጠራም")
         marked_set(user["id"], idx).add(num)
     return jsonify({"message": "ምልክት ተደርጓል"})
 
@@ -655,7 +586,7 @@ def api_miniapp_claim():
         cards = all_cards(user["id"])
         won = any(card_has_bingo(c, marked_set(user["id"], i)) for i, c in enumerate(cards))
         if not won: return json_error("BINGO አልደረሰም!")
-        if user["id"] in game_state["winner_ids"]: return json_error("Already claimed")
+        if user["id"] in game_state["winner_ids"]: return json_error("ቀድመው ጠይቀዋል")
         game_state["winner_ids"].add(user["id"])
         prize = game_state["prize"] if game_state["prize"] > 0 else 50
     update_credits(user["id"], prize, is_win=True)
@@ -668,7 +599,6 @@ def api_miniapp_deposit():
     if not user: return json_error("Unauthorized", 401)
     body = request.get_json() or {}
     amt, method, ref = body.get("amount"), body.get("method"), body.get("reference")
-    if not amt or not ref: return json_error("Missing fields")
     with closing(db()) as con:
         con.execute("INSERT INTO deposit_requests(user_id, method, amount, reference) VALUES(?,?,?,?)", (user["id"], method, amt, ref))
         con.commit()
@@ -685,11 +615,8 @@ def admin_overview():
     user = api_admin()
     if not user: return json_error("Admin access denied", 403)
     with closing(db()) as con:
-        uc = con.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-        tc = con.execute("SELECT COALESCE(SUM(credits+win_credits),0) FROM users").fetchone()[0]
-        pc = con.execute("SELECT COUNT(*) FROM deposit_requests WHERE status='pending'").fetchone()[0]
         reqs = con.execute("SELECT * FROM deposit_requests ORDER BY id DESC LIMIT 50").fetchall()
-        return jsonify({"users_count": uc, "total_credits": tc, "pending_count": pc, "requests": [dict(r) for r in reqs]})
+        return jsonify({"requests": [dict(r) for r in reqs]})
 
 @app.post("/api/admin/deposit/<int:req_id>/review")
 def admin_review(req_id):
@@ -707,7 +634,7 @@ def admin_review(req_id):
         con.commit()
     return jsonify({"ok": True, "message": "ተረጋግጧል"})
 
-@app.post("/telegram-webhook" if not WEBHOOK_SECRET_PATH else "/telegram-webhook/" + WEBHOOK_SECRET_PATH)
+@app.route("/telegram-webhook" if not WEBHOOK_SECRET_PATH else "/telegram-webhook/" + WEBHOOK_SECRET_PATH, methods=["POST"])
 def telegram_webhook():
     try:
         payload = request.get_json(force=True)
