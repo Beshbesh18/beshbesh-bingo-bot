@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """
 Flash Bingo — Telegram Bot + Telegram Mini App
-Complete implementation supporting 1 to 600 cards grid selection,
-Play/Win Wallets, Deposit/Withdraw, and live game loop.
+- 1 to 600 unique cards (each card number 1-600 has its own deterministic 5x5 grid)
+- Up to 4 cards per player
+- Play Wallet / Win Wallet & Admin deposit/withdraw
 """
 import os
 import json
@@ -27,7 +28,6 @@ from telegram.ext import (
     ContextTypes, filters,
 )
 
-# --------------------------- Configuration ---------------------------
 TOKEN = os.environ.get("TOKEN", "").strip()
 PUBLIC_URL = os.environ.get("RENDER_EXTERNAL_URL", "").strip().rstrip("/")
 WEBHOOK_SECRET_PATH = os.environ.get("WEBHOOK_SECRET_PATH", "").strip().strip("/")
@@ -39,6 +39,7 @@ DATABASE_PATH = os.environ.get("DATABASE_PATH", "flash_bingo.sqlite3")
 os.makedirs(os.path.dirname(os.path.abspath(DATABASE_PATH)), exist_ok=True)
 
 MAX_CARDS_TOTAL = 600
+MAX_CARDS_PER_PLAYER = 4
 CARD_COST = 1.00
 CALL_INTERVAL_SECONDS = 4
 
@@ -82,6 +83,15 @@ def init_db():
             status TEXT NOT NULL DEFAULT 'pending',
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS wins (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            username TEXT NOT NULL DEFAULT '',
+            round_no INTEGER NOT NULL,
+            card_id INTEGER NOT NULL,
+            prize REAL NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
         """)
         con.commit()
 
@@ -113,13 +123,15 @@ game_state = {
     "marked": {},      # (user_id, card_id) -> set
 }
 
-def generate_card():
+def generate_card_for_id(card_id):
+    # Deterministic generation based on card_id so card #20 always has the same numbers
+    rng = random.Random(card_id + 9999)
     cols = [
-        random.sample(range(1, 16), 5),
-        random.sample(range(16, 31), 5),
-        random.sample(range(31, 46), 5),
-        random.sample(range(46, 61), 5),
-        random.sample(range(61, 76), 5),
+        rng.sample(range(1, 16), 5),
+        rng.sample(range(16, 31), 5),
+        rng.sample(range(31, 46), 5),
+        rng.sample(range(46, 61), 5),
+        rng.sample(range(61, 76), 5),
     ]
     card = [[cols[c][r] for c in range(5)] for r in range(5)]
     card[2][2] = "FREE"
@@ -127,8 +139,22 @@ def generate_card():
 
 def get_card(card_id):
     if card_id not in game_state["cards_data"]:
-        game_state["cards_data"][card_id] = generate_card()
+        game_state["cards_data"][card_id] = generate_card_for_id(card_id)
     return game_state["cards_data"][card_id]
+
+def card_has_bingo(card, marked):
+    marked = set(marked) | {"FREE"}
+    for r in range(5):
+        if all(card[r][c] in marked for c in range(5)):
+            return True
+    for c in range(5):
+        if all(card[r][c] in marked for r in range(5)):
+            return True
+    if all(card[i][i] in marked for i in range(5)):
+        return True
+    if all(card[i][4-i] in marked for i in range(5)):
+        return True
+    return False
 
 def auto_caller():
     while True:
@@ -164,10 +190,6 @@ bot_application.add_handler(CommandHandler("start", start))
 @app.route("/")
 def index():
     return INDEX_HTML
-
-@app.route("/admin")
-def admin():
-    return ADMIN_HTML
 
 @app.route("/static/style.css")
 def css():
@@ -224,16 +246,19 @@ def api_buy():
     uid = int(user["id"])
     data = request.get_json() or {}
     cid = int(data.get("card_id", 0))
-    if not (1 <= cid <= 600): return jsonify({"error": "Invalid card ID"}), 400
+    if not (1 <= cid <= MAX_CARDS_TOTAL): return jsonify({"error": "Invalid card ID"}), 400
     
     with game_lock:
+        user_cards = [c for c, u_id in game_state["cards_owner"].items() if u_id == uid]
+        if len(user_cards) >= MAX_CARDS_PER_PLAYER:
+            return jsonify({"error": "ከ 4 ካርድ በላይ መያዝ አይችሉም (Max 4 cards)"}), 400
         if cid in game_state["cards_owner"]:
-            return jsonify({"error": "Card already taken"}), 400
+            return jsonify({"error": "ይህ ካርድ በሌላ ተጫዋች ተይዟል"}), 400
+        
         u = get_user(uid)
         if u["play_wallet"] < CARD_COST:
-            return jsonify({"error": "Insufficient balance"}), 400
+            return jsonify({"error": "ቂ ክሬዲት የለዎትም (Insufficient balance)"}), 400
         
-        # Deduct balance
         with closing(db()) as con:
             con.execute("UPDATE users SET play_wallet = play_wallet - ? WHERE user_id = ?", (CARD_COST, uid))
             con.commit()
@@ -241,7 +266,7 @@ def api_buy():
         game_state["cards_owner"][cid] = uid
         game_state["prize"] += CARD_COST
         game_state["is_active"] = True
-    return jsonify({"message": f"Card #{cid} purchased!"})
+    return jsonify({"message": f"ካርድ #{cid} ተገዝቷል!"})
 
 @app.route("/api/mark", methods=["POST"])
 def api_mark():
@@ -264,6 +289,33 @@ def api_mark():
         game_state["marked"][key].add(num)
     return jsonify({"success": True})
 
+@app.route("/api/claim", methods=["POST"])
+def api_claim():
+    user = get_api_user()
+    if not user: return jsonify({"error": "Unauthorized"}), 401
+    uid = int(user["id"])
+    with game_lock:
+        user_cards = [cid for cid, uid_val in game_state["cards_owner"].items() if uid_val == uid]
+        won_card = None
+        for cid in user_cards:
+            card = get_card(cid)
+            m = game_state["marked"].get((uid, cid), {"FREE"})
+            if card_has_bingo(card, m):
+                won_card = cid
+                break
+        if won_card is None:
+            return jsonify({"error": "ገና ትክክለኛ ቢንጎ አልደረሰም!"}), 400
+        
+        prize = game_state["prize"] or (len(user_cards) * CARD_COST)
+        game_state["is_active"] = False
+        
+        with closing(db()) as con:
+            con.execute("UPDATE users SET win_wallet = win_wallet + ? WHERE user_id = ?", (prize, uid))
+            con.execute("INSERT INTO wins(user_id, username, round_no, card_id, prize) VALUES(?,?,?,?,?)",
+                        (uid, user.get("username", ""), game_state["round"], won_card, prize))
+            con.commit()
+    return jsonify({"message": f"BINGO! አሸንፈዋል! ሽልማት: {prize} ብር"})
+
 @app.route("/api/deposit", methods=["POST"])
 def api_deposit():
     user = get_api_user()
@@ -278,15 +330,16 @@ def api_deposit():
         con.execute("INSERT INTO transactions(user_id, type, method, amount, reference) VALUES(?,?,?,?,?)",
                     (int(user["id"]), "deposit", method, amount, ref))
         con.commit()
-    return jsonify({"message": "Deposit request sent successfully."})
+    return jsonify({"message": "የክፍያ ማመልከቻ ተልኳል። አድሚን ሲያረጋግጥ ይጨመራል።"})
 
-# ------------------------------ Frontend HTML/CSS/JS -------------------
+# ------------------------------ Frontend HTML / CSS / JS -------------
 INDEX_HTML = r"""<!doctype html>
 <html lang="am"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Flash Bingo</title><script src="https://telegram.org/js/telegram-web-app.js"></script><link rel="stylesheet" href="/static/style.css"></head>
 <body>
 <div class="app-shell">
-  <header class="topbar"><div class="logo">⚡</div><div><h1>Flash Bingo</h1></div><div class="live">LIVE</div></header>
+  <header class="topbar"><div class="logo">⚡</div><h1>Flash Bingo</h1><div class="live">LIVE</div></header>
+  
   <div class="wallet-box">
     <div><small>PLAY WALLET</small><div id="play-wallet" class="val">0.00</div></div>
     <div><small>WIN WALLET</small><div id="win-wallet" class="val">0.00</div></div>
@@ -299,15 +352,23 @@ INDEX_HTML = r"""<!doctype html>
   </div>
 
   <div class="grid-container" id="cards-view"></div>
-  <button id="open-grid" class="pri full">＋ ካርድ ምረጥ (1-600)</button>
+  <button id="open-grid" class="pri full">＋ ካርድ ምረጥ (ከ 1 እስከ 600)</button>
+  <button id="claim-btn" class="pri full" style="background:#ffe629;color:#000;margin-top:8px;">🏆 BINGO! አሸንፍ</button>
 
-  <nav class="nav"><button class="active">BINGO</button><button onclick="openWalletTab()">WALLET</button><button onclick="openRankTab()">RANK</button></nav>
+  <nav class="nav">
+    <button class="active">BINGO</button>
+    <button onclick="document.getElementById('deposit-modal').style.display='block'">WALLET</button>
+    <button onclick="alert('Rank feature coming soon!')">RANK</button>
+  </nav>
 </div>
+
 <div id="modal" class="modal" style="display:none;"><div class="modal-content">
   <h3>ካርድ ቁጥር ምረጥ (1 እስከ 600)</h3>
+  <p style="font-size:11px;color:#a3b8a8;">እባክዎ የሚፈልጉትን የካርድ ቁጥር ይጫኑ (እስከ 4 ካርዶች)</p>
   <div id="grid-600" class="grid-600"></div>
   <button onclick="document.getElementById('modal').style.display='none'" class="sec full">ዝጋ</button>
 </div></div>
+
 <div id="deposit-modal" class="modal" style="display:none;"><div class="modal-content">
   <h3>ክሬዲት መሙላት (Telebirr/CBE)</h3>
   <input id="dep-amount" type="number" placeholder="መጠን (ብር)">
@@ -315,6 +376,7 @@ INDEX_HTML = r"""<!doctype html>
   <button onclick="sendDeposit()" class="pri full">ማመልከቻ ላክ</button>
   <button onclick="document.getElementById('deposit-modal').style.display='none'" class="sec full" style="margin-top:6px;">ዝጋ</button>
 </div></div>
+
 <script src="/static/app.js"></script></body></html>"""
 
 STYLE_CSS = r""":root{--bg:#06180d;--panel:#0b2113;--panel2:#102d19;--gold:#ffe629;--teal:#39d66f;--text:#fff}
@@ -335,14 +397,15 @@ button{padding:10px;border:0;border-radius:8px;font-weight:bold;cursor:pointer}
 .cell{aspect-ratio:1;background:#06180d;border:1px solid #20552d;color:#fff;font-size:12px;border-radius:4px;display:grid;place-items:center}
 .cell.marked{background:var(--teal);color:#000}
 .cell.called{border-color:var(--gold)}
-.nav{position:fixed;bottom:0;left:0;right:0;background:#031008;display:flex;justify-content:around;padding:10px;border-top:1px solid #20552d}
+.nav{position:fixed;bottom:0;left:0;right:0;background:#031008;display:flex;justify-content:space-around;padding:10px;border-top:1px solid #20552d;z-index:99}
 .nav button{background:0;color:#aaa}
 .nav button.active{color:var(--teal)}
 .modal{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.8);padding:20px;z-index:100}
 .modal-content{background:var(--panel);padding:15px;border-radius:12px;max-width:400px;margin:auto}
-.grid-600{display:grid;grid-template-columns:repeat(10,1fr);gap:3px;max-height:280px;overflow-y:auto;margin:10px 0}
-.grid-600 button{font-size:9px;padding:6px 2px;background:#112d1b;color:#fff;border:1px solid #20552d}
-.grid-600 button.taken{background:var(--teal);color:#000}
+.grid-600{display:grid;grid-template-columns:repeat(10,1fr);gap:3px;max-height:300px;overflow-y:auto;margin:10px 0}
+.grid-600 button{font-size:10px;padding:6px 2px;background:#112d1b;color:#fff;border:1px solid #20552d}
+.grid-600 button.taken{background:#555;color:#888;cursor:not-allowed}
+.grid-600 button.mine{background:var(--teal);color:#000}
 input{width:100%;padding:8px;margin:6px 0;background:#06180d;border:1px solid #20552d;color:#fff;border-radius:6px}
 """
 
@@ -366,34 +429,38 @@ async function refresh(){
   data.user_cards.forEach(uc => {
     let marked = new Set(data.marked[uc.card_id] || ['FREE']);
     let called = new Set(data.called_numbers);
-    html += `<div class="card-box"><div>CARD #${uc.card_id}</div><div class="card-grid">`;
+    html += `<div class="card-box"><div style="font-weight:bold;color:#ffe629;margin-bottom:4px;">CARD #${uc.card_id}</div><div class="card-grid">`;
     uc.grid.forEach(row => row.forEach(n => {
       let isFree = (n==='FREE');
       let isCalled = called.has(n);
       let isMarked = marked.has(n);
-      html += `<button class="cell ${isMarked?'marked':''} ${isCalled?'called':''}" onclick="mark(${uc.card_id}, ${n})">${isFree?'★':n}</button>`;
+      html += `<button class="cell ${isMarked?'marked':''} ${isCalled?'called':''}" onclick="mark(${uc.card_id}, '${n}')">${isFree?'★':n}</button>`;
     }));
     html += `</div></div>`;
   });
-  document.getElementById('cards-view').innerHTML = html || '<div style="color:#aaa;text-align:center;">እስካሁን የገዙት ካርድ የለም</div>';
+  document.getElementById('cards-view').innerHTML = html || '<div style="color:#aaa;text-align:center;padding:15px;">እስካሁን የገዙት ካርድ የለም። ከ 1 እስከ 600 ካርድ ይምረጡ።</div>';
   window.cardsStatus = data.cards_status || {};
 }
 window.mark = async(cardId, num) => {
-  await api('/api/mark', 'POST', {card_id: cardId, number: num});
+  let val = num === 'FREE' ? 'FREE' : Number(num);
+  let res = await api('/api/mark', 'POST', {card_id: cardId, number: val});
+  if(res.error) alert(res.error);
   refresh();
 };
 document.getElementById('open-grid').onclick = () => {
   let h = '';
   for(let i=1; i<=600; i++){
-    let taken = window.cardsStatus[i];
-    h += `<button class="${taken?'taken':''}" onclick="buyCard(${i})">${i}</button>`;
+    let owner = window.cardsStatus[i];
+    let cssClass = '';
+    if(owner) cssClass = 'taken';
+    h += `<button class="${cssClass}" onclick="buyCard(${i})">${i}</button>`;
   }
   document.getElementById('grid-600').innerHTML = h;
   document.getElementById('modal').style.display = 'block';
 };
 window.buyCard = async(cid) => {
   let res = await api('/api/buy', 'POST', {card_id: cid});
-  if(res.error) alert(res.error);
+  if(res.error) { alert(res.error); return; }
   document.getElementById('modal').style.display = 'none';
   refresh();
 };
@@ -406,12 +473,27 @@ window.sendDeposit = async() => {
   document.getElementById('deposit-modal').style.display = 'none';
   refresh();
 };
+document.getElementById('claim-btn').onclick = async() => {
+  let res = await api('/api/claim', 'POST');
+  alert(res.message || res.error);
+  refresh();
+};
 refresh(); setInterval(refresh, 4000);
 })();"""
 
-ADMIN_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><title>Admin</title></head>
-<body style="background:#111;color:#fff;padding:20px;"><h1>🛡 Admin Panel</h1><p>관리자 패널</p></body></html>"""
-
 if __name__ == "__main__":
+    def run_bot():
+        bot_loop.run_until_complete(bot_application.initialize())
+        bot_loop.run_until_complete(bot_application.start())
+        if PUBLIC_URL:
+            webhook_url = f"{PUBLIC_URL}/telegram/webhook"
+            if WEBHOOK_SECRET_PATH:
+                webhook_url += f"/{WEBHOOK_SECRET_PATH}"
+            bot_loop.run_until_complete(bot_application.bot.set_webhook(webhook_url))
+        else:
+            bot_loop.run_until_complete(bot_application.updater.start_polling())
+        bot_loop.run_forever()
+
     threading.Thread(target=bot_application.run_polling, daemon=True).start()
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
