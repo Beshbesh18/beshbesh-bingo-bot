@@ -7,6 +7,8 @@ Play/Win Wallets, Deposit/Withdraw, and Rank features.
 import os
 import json
 import time
+import hmac
+import hashlib
 import logging
 import asyncio
 import threading
@@ -14,18 +16,23 @@ import random
 import sqlite3
 from urllib.parse import parse_qsl
 from contextlib import closing
+from datetime import datetime, timezone
 
 from flask import Flask, request, Response, jsonify
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo,
+    ReplyKeyboardMarkup, KeyboardButton,
 )
 from telegram.ext import (
-    Application, CommandHandler, ContextTypes,
+    Application, CommandHandler, CallbackQueryHandler, MessageHandler,
+    ContextTypes, filters,
 )
 
 # --------------------------- Configuration ---------------------------
 TOKEN = os.environ.get("TOKEN", "").strip()
 PUBLIC_URL = os.environ.get("RENDER_EXTERNAL_URL", "").strip().rstrip("/")
+WEBHOOK_SECRET_PATH = os.environ.get("WEBHOOK_SECRET_PATH", "").strip().strip("/")
+LIVE_CHAT_ID = os.environ.get("LIVE_CHAT_ID", "").strip()
 ADMIN_IDS = {
     int(x.strip()) for x in os.environ.get("ADMIN_IDS", "").split(",")
     if x.strip().isdigit()
@@ -52,6 +59,7 @@ if not TOKEN:
 app = Flask(__name__)
 bot_application = Application.builder().token(TOKEN).build()
 bot_loop = asyncio.new_event_loop()
+bot_thread = None
 game_lock = threading.RLock()
 
 # ------------------------------ Database -----------------------------
@@ -79,7 +87,9 @@ def init_db():
             amount REAL NOT NULL,
             reference TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'pending',
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            reviewed_at TEXT,
+            reviewed_by INTEGER
         );
         CREATE TABLE IF NOT EXISTS withdraw_requests (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -87,6 +97,15 @@ def init_db():
             account_info TEXT NOT NULL,
             amount REAL NOT NULL,
             status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS wins (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            username TEXT NOT NULL DEFAULT '',
+            round_no INTEGER NOT NULL,
+            card_index INTEGER NOT NULL,
+            prize REAL NOT NULL,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
         """)
@@ -114,6 +133,15 @@ def update_credits(user_id, delta, is_win=False):
         row = con.execute(f"SELECT credits, win_credits FROM users WHERE user_id=?", (int(user_id),)).fetchone()
         return row["credits"] if row else 0.0
 
+def set_language(user_id, language):
+    with closing(db()) as con:
+        con.execute("UPDATE users SET language=? WHERE user_id=?", (language, int(user_id)))
+        con.commit()
+
+def get_language(user_id):
+    row = get_user(user_id)
+    return row["language"] if row else "am"
+
 init_db()
 
 # ------------------------------ Game State ---------------------------
@@ -135,7 +163,6 @@ def fresh_game():
 game_state = fresh_game()
 
 def generate_75_bingo_card(seed_val):
-    # Standard Bingo 5x5 using numbers 1 to 75 distributed across columns
     rng = random.Random(seed_val)
     cols = [
         rng.sample(range(1, 16), 5),
@@ -170,15 +197,9 @@ def game_loop_worker():
             now = time.time()
             if game_state["phase"] == "selecting":
                 if now >= game_state["selection_ends_at"]:
-                    # Transition to playing phase
                     game_state["phase"] = "playing"
                     game_state["called_numbers"] = []
                     game_state["current_number"] = None
-            elif game_state["phase"] == "playing":
-                # Call numbers every interval if active players exist
-                if game_state["player_cards"]:
-                    # check call interval via time or separate thread loop
-                    pass
 
 def auto_caller_loop():
     while True:
@@ -190,17 +211,6 @@ def auto_caller_loop():
                     num = random.choice(remaining)
                     game_state["called_numbers"].append(num)
                     game_state["current_number"] = num
-                    
-                    # Check if any player won automatically or can claim
-                    for uid, card_ids in list(game_state["player_cards"].items()):
-                        if uid in game_state["winner_ids"]:
-                            continue
-                        for cid in card_ids:
-                            mat = game_state["card_matrices"].get((uid, cid))
-                            mset = game_state["marked"].get((uid, cid), {"FREE"})
-                            if mat and card_has_bingo(mat, mset):
-                                # Auto trigger win or mark winner
-                                pass
 
 def reset_round():
     global game_state
@@ -217,18 +227,189 @@ def reset_round():
         game_state["marked"] = {}
         game_state["winner_ids"] = set()
 
-# ------------------------------ Telegram Handlers -------------------------
+# ------------------------------ Localization & Handlers -------------------------
+TEXT = {
+    "am": {
+        "welcome": "🎰 እንኳን ደህና መጡ ወደ Flash Bingo!\n\nአጓጊ እና ፈጣን የቢንጎ ጨዋታ መድረክ።",
+        "play": "🎮 Flash Bingo ጨዋታ",
+        "balance": "💰 ብር ሂሳብ",
+        "rules": "📜 ሕግ እና ደንቦች",
+        "wallet": "💳 Wallet / ኪስ ቦርሳ",
+        "rank": "🏆 ደረጃ",
+        "language": "🌐 ቋንቋ / Language",
+        "support": "ជំនួយ",
+        "admin": "🛡 አድሚን",
+        "choose": "ከታች ያሉትን አማራጮች ይምረጡ።",
+        "balance_msg": "💰 የኪስ ሂሳብዎ:\nPlay Wallet: {credits} ETB\nWin Wallet: {win_credits} ETB",
+        "rules_msg": "📜 ሕጎች\n• ካርድ ዋጋ: 10 ብር\n• ከ 1 እስከ 600 ካርዶች ውስጥ ይምረጡ\n• ቁጥሮች ከ 1 እስከ 75 ይጠራሉ",
+        "language_set": "ቋንቋው ወደ አማርኛ ተስተካክሏል።",
+    },
+    "en": {
+        "welcome": "🎰 Welcome to Flash Bingo!\n\nFast and exciting bingo gaming platform.",
+        "play": "🎮 Play Flash Bingo",
+        "balance": "💰 Balance",
+        "rules": "📜 Rules",
+        "wallet": "💳 Wallet",
+        "rank": "🏆 Rank",
+        "language": "🌐 Language",
+        "support": "Help",
+        "admin": "🛡 Admin",
+        "choose": "Choose an option below.",
+        "balance_msg": "💰 Your balance:\nPlay Wallet: {credits} ETB\nWin Wallet: {win_credits} ETB",
+        "rules_msg": "📜 Rules\n• Card cost: 10 ETB\n• Pick cards from 1 to 600\n• Numbers called from 1 to 75",
+        "language_set": "Language changed to English.",
+    },
+}
+
+def tr(user_id, key, **kwargs):
+    lang = get_language(user_id)
+    return TEXT.get(lang, TEXT["am"]).get(key, TEXT["am"].get(key, key)).format(**kwargs)
+
+def main_keyboard(user_id):
+    lang = get_language(user_id)
+    t = TEXT.get(lang, TEXT["am"])
+    return ReplyKeyboardMarkup([
+        [KeyboardButton(t["play"]), KeyboardButton(t["balance"])],
+        [KeyboardButton(t["wallet"]), KeyboardButton(t["rank"])],
+        [KeyboardButton(t["rules"]), KeyboardButton(t["language"])],
+        [KeyboardButton(t["support"])],
+    ], resize_keyboard=True)
+
+def webapp_url():
+    return PUBLIC_URL + "/"
+
+def start_keyboard():
+    if PUBLIC_URL:
+        return InlineKeyboardMarkup([[
+            InlineKeyboardButton("⚡ Flash Bingo ክፍት", web_app=WebAppInfo(url=webapp_url()))
+        ]])
+    return None
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     ensure_user(user.id, user.username, user.first_name)
+    text = tr(user.id, "welcome") + "\n\n" + tr(user.id, "choose")
+    markup = start_keyboard()
+    if markup:
+        await update.effective_message.reply_text(text, reply_markup=markup)
+    await update.effective_message.reply_text("Flash Bingo ⚡", reply_markup=main_keyboard(user.id))
+
+async def language_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    ensure_user(user.id, user.username, user.first_name)
     keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("⚡ Flash Bingo ክፈት", web_app=WebAppInfo(url=PUBLIC_URL + "/"))
-    ]]) if PUBLIC_URL else None
-    await update.effective_message.reply_text("⚡ እንኳን ደህና መጡ ወደ Flash Bingo!", reply_markup=keyboard)
+        InlineKeyboardButton("አማርኛ", callback_data="lang:am"),
+        InlineKeyboardButton("English", callback_data="lang:en"),
+    ]])
+    await update.effective_message.reply_text("ቋንቋ ይምረጡ / Choose language:", reply_markup=keyboard)
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    ensure_user(user.id, user.username, user.first_name)
+    msg = (update.effective_message.text or "").strip()
+    lang = get_language(user.id)
+    t = TEXT.get(lang, TEXT["am"])
+    if msg in (t["play"], "🎮 Flash Bingo ጨዋታ", "🎮 በሽ በሽ ቢንጎ ጨዋታ"):
+        markup = start_keyboard()
+        if markup:
+            await update.effective_message.reply_text("Flash Bingo ⚡", reply_markup=markup)
+        else:
+            await update.effective_message.reply_text("Set RENDER_EXTERNAL_URL to enable the Mini App.")
+    elif msg in (t["balance"], "💰 ብር ሂሳብ", "💰 Balance"):
+        row = get_user(user.id)
+        await update.effective_message.reply_text(tr(user.id, "balance_msg", credits=row["credits"], win_credits=row["win_credits"]))
+    elif msg in (t["rules"], "📜 ሕግ እና ደንቦች", "📜 Rules"):
+        await update.effective_message.reply_text(tr(user.id, "rules_msg"))
+    elif msg in (t["wallet"], "💳 Wallet / ኪስ ቦርሳ"):
+        await update.effective_message.reply_text(
+            "💳 Wallet\nTelebirr: 0918719332 · Enyew\nCBE Birr: 0918719332 · Enyew\n\n"
+            "ክፍያ ከፈጸሙ በኋላ በ Mini App ውስጥ የክፍያ ማረጋገጫ ቁጥርዎን ይላኩ።")
+    elif msg in (t["rank"], "🏆 ደረጃ", "🏆 Rank"):
+        with closing(db()) as con:
+            rows = con.execute("SELECT username, first_name, win_credits FROM users ORDER BY win_credits DESC LIMIT 10").fetchall()
+        lines = ["🏆 Top Flash Players"]
+        for i, r in enumerate(rows, 1):
+            name = ("@" + r["username"]) if r["username"] else (r["first_name"] or "Player")
+            lines.append(f"{i}. {name} — {r['win_credits']} ETB")
+        await update.effective_message.reply_text("\n".join(lines))
+    elif msg in (t["language"], "🌐 ቋንቋ / Language"):
+        await language_command(update, context)
+    elif msg in (t["support"], "ជំនួយ", "Help"):
+        await update.effective_message.reply_text("ជំនួយ / Help\nContact administrator for support.")
+    else:
+        await update.effective_message.reply_text(tr(user.id, "choose"), reply_markup=main_keyboard(user.id))
+
+async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id not in ADMIN_IDS:
+        await update.effective_message.reply_text("🚫 Unauthorized.")
+        return
+    if PUBLIC_URL:
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("🛡 Open Flash Admin Panel", web_app=WebAppInfo(url=PUBLIC_URL + "/admin"))
+        ]])
+        await update.effective_message.reply_text("🛡 Admin panel", reply_markup=keyboard)
+    else:
+        await update.effective_message.reply_text("Admin panel unavailable until RENDER_EXTERNAL_URL is configured.")
+
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    ensure_user(user_id, query.from_user.username, query.from_user.first_name)
+    if query.data.startswith("lang:"):
+        lang = query.data.split(":", 1)[1]
+        if lang in ("am", "en"):
+            set_language(user_id, lang)
+            await query.edit_message_text(TEXT[lang]["language_set"])
 
 bot_application.add_handler(CommandHandler("start", start))
+bot_application.add_handler(CommandHandler("language", language_command))
+bot_application.add_handler(CommandHandler("admin", admin_command))
+bot_application.add_handler(CallbackQueryHandler(callback_handler))
+bot_application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-# ------------------------------ HTML / CSS / JS Assets ---------------------
+# ---------------------------- Mini App auth ---------------------------
+def validate_telegram_init_data(init_data):
+    if not init_data:
+        return None
+    try:
+        pairs = dict(parse_qsl(init_data, keep_blank_values=True))
+        received_hash = pairs.pop("hash", None)
+        if not received_hash:
+            return None
+        data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
+        secret_key = hmac.new(b"WebAppData", TOKEN.encode(), hashlib.sha256).digest()
+        calculated = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(calculated, received_hash):
+            return None
+        user_data = json.loads(pairs.get("user", "{}"))
+        if not user_data.get("id"):
+            return None
+        return user_data
+    except Exception:
+        logger.exception("Failed to validate initData")
+        return None
+
+def api_user():
+    data = validate_telegram_init_data(request.headers.get("X-Telegram-Init-Data", ""))
+    if data:
+        ensure_user(data["id"], data.get("username", ""), data.get("first_name", ""))
+        return data
+    if os.environ.get("ALLOW_DEMO_MODE", "").lower() == "true":
+        demo_id = int(request.headers.get("X-Demo-User", "999999"))
+        ensure_user(demo_id, "demo", "Demo Player")
+        return {"id": demo_id, "username": "demo", "first_name": "Demo Player"}
+    return None
+
+def api_admin():
+    user = api_user()
+    return user if user and int(user["id"]) in ADMIN_IDS else None
+
+def json_error(message, status=400):
+    return jsonify({"error": message}), status
+
+# ------------------------------ HTML & JS Assets ---------------------------
 INDEX_HTML = r"""<!doctype html>
 <html lang="am"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="theme-color" content="#06180d"><title>Flash Bingo</title><script src="https://telegram.org/js/telegram-web-app.js"></script><link rel="stylesheet" href="/static/style.css"></head>
 <body><main class="app-shell">
@@ -302,6 +483,15 @@ INDEX_HTML = r"""<!doctype html>
 </nav>
 </main><div id="toast"></div><script src="/static/app.js"></script></body></html>"""
 
+ADMIN_HTML = r"""<!doctype html><html lang="am"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Flash Bingo Admin</title><link rel="stylesheet" href="/static/style.css"><style>.admin{max-width:700px;margin:auto;padding:16px}.req{background:#0b2113;border:1px solid #20552d;padding:12px;border-radius:10px;margin-bottom:10px}</style></head>
+<body class="admin"><header><h1>🛡 Flash Bingo አድሚን ፓነል</h1><button id="refresh" class="primary-btn">⟳ አዲስ</button></header>
+<section style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:15px 0">
+  <div class="req"><span>ተጫዋቾች</span><strong id="u-count">—</strong></div>
+  <div class="req"><span>ጠቅላላ ብር</span><strong id="t-cred">—</strong></div>
+  <div class="req"><span>በመጠባበቅ ላይ</span><strong id="p-count">—</strong></div>
+</section>
+<h2>የክፍያ ጥያቄዎች</h2><div id="req-list">ጭነት ላይ...</div><script src="/static/admin.js"></script></body></html>"""
+
 STYLE_CSS = r""":root{color-scheme:dark;--bg:#041509;--panel:#0b2113;--panel2:#102d19;--line:#20552d;--text:#f4f7f4;--muted:#a3b8a8;--gold:#ffe629;--teal:#39d66f}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);font-family:system-ui,sans-serif;color:var(--text);padding-bottom:70px}
 .app-shell{max-width:520px;margin:auto;padding:12px}
@@ -362,14 +552,12 @@ document.getElementById('selection-panel').style.display=isSelecting?'block':'no
 document.getElementById('live-game-panel').style.display=isSelecting?'none':'block';
 document.getElementById('game-actions').style.display=isSelecting?'none':'grid';
 
-// Timer calculation
 let rem=Math.max(0, Math.floor(model.selection_ends_at - Date.now()/1000));
 document.getElementById('timer').textContent=rem;
-document.getElementById('phase-banner.').style=isSelecting?'display:block':'display:none';
+document.getElementById('phase-banner').style.display=isSelecting?'block':'none';
 
 document.getElementById('my-chosen-count').textContent='የተመረጡ: '+model.my_cards.length+'/4';
 
-// 1-600 picker grid
 let picker=document.getElementById('number-picker-grid');
 if(picker.children.length===0 && isSelecting){
   picker.innerHTML='';
@@ -380,7 +568,6 @@ if(picker.children.length===0 && isSelecting){
     picker.appendChild(btn);
   }
 }
-// update classes for picker
 if(isSelecting){
   let takenSet=new Set(model.taken_cards||[]);
   let mySet=new Set(model.my_cards||[]);
@@ -392,7 +579,6 @@ if(isSelecting){
   });
 }
 
-// 1-75 live master grid
 let calledSet=new Set(model.called_numbers);
 let mg75=document.getElementById('master-grid-75');
 if(mg75.children.length===0 && !isSelecting){
@@ -409,7 +595,6 @@ if(!isSelecting){
   }
 }
 
-// Render player cards (5x5, 1-75 pool)
 let cc=document.getElementById('cards-container');cc.innerHTML='';
 model.my_cards_data.forEach(item=>{
   let cid=item.card_id;
@@ -466,30 +651,33 @@ document.getElementById('send-withdraw').onclick=()=>{
 refresh();setInterval(refresh,1000);
 })();"""
 
-# ------------------------------ Flask Routes & API -------------------------
-def api_user():
-    init_data = request.headers.get("X-Telegram-Init-Data", "")
-    try:
-        parsed = dict(parse_qsl(init_data))
-        user_str = parsed.get("user")
-        if user_str:
-            u = json.loads(user_str)
-            return {"id": u.get("id"), "username": u.get("username", ""), "first_name": u.get("first_name", "")}
-    except Exception:
-        pass
-    return None
+ADMIN_JS = r"""async function load(){
+const r=await fetch('/api/admin/overview',{headers:{'X-Telegram-Init-Data':window.Telegram?.WebApp?.initData||''}});
+const d=await r.json();
+document.getElementById('u-count').textContent=d.users_count;
+document.getElementById('t-cred').textContent=d.total_credits;
+document.getElementById('p-count').textContent=d.pending_count;
+document.getElementById('req-list').innerHTML=d.requests.map(r=>`<div class="req"><b>#${r.id} · ${r.amount} ብር (${r.method})</b><p>User: ${r.user_id} | Ref: ${r.reference}</p><button onclick="review(${r.id},'approve')" style="background:#39d66f;border:0;padding:6px 12px;border-radius:6px;font-weight:bold">አጽድቅ</button></div>`).join('');
+}
+async function review(id,decision){await fetch(`/api/admin/deposit/${id}/review`,{method:'POST',headers:{'Content-Type':'application/json','X-Telegram-Init-Data':window.Telegram?.WebApp?.initData||''},body:JSON.stringify({decision})});load();}
+document.getElementById('refresh').onclick=load;load();
+"""
 
-def json_error(msg, code=400):
-    return jsonify({"error": msg}), code
-
+# ------------------------------ Flask API Routes -------------------------
 @app.route("/static/style.css")
 def serve_css(): return Response(STYLE_CSS, mimetype="text/css")
 
 @app.route("/static/app.js")
 def serve_app_js(): return Response(APP_JS, mimetype="application/javascript")
 
+@app.route("/static/admin.js")
+def serve_admin_js(): return Response(ADMIN_JS, mimetype="application/javascript")
+
 @app.route("/", methods=["GET"])
 def index(): return Response(INDEX_HTML, mimetype="text/html")
+
+@app.route("/admin", methods=["GET"])
+def admin_panel(): return Response(ADMIN_HTML, mimetype="text/html")
 
 @app.get("/api/miniapp/game")
 def api_miniapp_game():
@@ -499,7 +687,6 @@ def api_miniapp_game():
     row = get_user(uid)
     with game_lock:
         now = time.time()
-        # check timer phase switch
         if game_state["phase"] == "selecting" and now >= game_state["selection_ends_at"]:
             game_state["phase"] = "playing"
         
@@ -545,11 +732,10 @@ def api_miniapp_select_card():
         
         my_cards = game_state["player_cards"].setdefault(uid, [])
         if card_num in my_cards:
-            # Deselect / cancel
             my_cards.remove(card_num)
             game_state["taken_card_numbers"].discard(card_num)
             game_state["prize"] -= CARD_COST
-            update_credits(uid, CARD_COST, is_win=False) # refund
+            update_credits(uid, CARD_COST, is_win=False)
             return jsonify({"message": "ካርዱ ተሰርዟል"})
         
         if len(my_cards) >= MAX_CARDS_PER_PLAYER:
@@ -562,7 +748,6 @@ def api_miniapp_select_card():
         game_state["prize"] += CARD_COST
         update_credits(uid, -CARD_COST, is_win=False)
         
-        # generate 5x5 matrix (1-75 pool)
         game_state["card_matrices"][(uid, card_num)] = generate_75_bingo_card(card_num * 999 + uid)
         game_state["marked"][(uid, card_num)] = {"FREE"}
 
@@ -634,21 +819,68 @@ def miniapp_rank():
         rows = con.execute("SELECT username, first_name, win_credits FROM users ORDER BY win_credits DESC LIMIT 10").fetchall()
         return jsonify({"rows": [{"name": ("@" + r["username"]) if r["username"] else (r["first_name"] or "Player"), "credits": r["win_credits"]} for r in rows]})
 
-# ------------------------------ Initialization ---------------------------
-def run_flask():
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+@app.get("/api/admin/overview")
+def admin_overview():
+    user = api_admin()
+    if not user: return json_error("Admin access denied", 403)
+    with closing(db()) as con:
+        uc = con.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        tc = con.execute("SELECT COALESCE(SUM(credits+win_credits),0) FROM users").fetchone()[0]
+        pc = con.execute("SELECT COUNT(*) FROM deposit_requests WHERE status='pending'").fetchone()[0]
+        reqs = con.execute("SELECT * FROM deposit_requests ORDER BY id DESC LIMIT 50").fetchall()
+        return jsonify({"users_count": uc, "total_credits": tc, "pending_count": pc, "requests": [dict(r) for r in reqs]})
+
+@app.post("/api/admin/deposit/<int:req_id>/review")
+def admin_review(req_id):
+    user = api_admin()
+    if not user: return json_error("Admin access denied", 403)
+    body = request.get_json(silent=True) or {}
+    decision = body.get("decision")
+    with closing(db()) as con:
+        row = con.execute("SELECT * FROM deposit_requests WHERE id=?", (req_id,)).fetchone()
+        if not row or row["status"] != "pending": return json_error("Invalid request")
+        status = "approved" if decision == "approve" else "rejected"
+        con.execute("UPDATE deposit_requests SET status=?, reviewed_at=CURRENT_TIMESTAMP WHERE id=?", (status, req_id))
+        if decision == "approve":
+            con.execute("UPDATE users SET credits=credits+? WHERE user_id=?", (row["amount"], row["user_id"]))
+        con.commit()
+    return jsonify({"ok": True, "message": "ተረጋግጧል"})
+
+@app.post("/telegram-webhook" if not WEBHOOK_SECRET_PATH else "/telegram-webhook/" + WEBHOOK_SECRET_PATH)
+def telegram_webhook():
+    try:
+        payload = request.get_json(force=True)
+        update = Update.de_json(payload, bot_application.bot)
+        if bot_loop.is_running():
+            asyncio.run_coroutine_threadsafe(bot_application.process_update(update), bot_loop)
+        return "OK"
+    except Exception:
+        return "ERROR", 500
+
+@app.route("/<path:path>", methods=["GET", "HEAD"])
+def fallback(path): return jsonify({"error": "Not found"}), 404
+
+def run_bot_loop():
+    asyncio.set_event_loop(bot_loop)
+    bot_loop.run_forever()
+
+def start_bot():
+    global bot_thread
+    if bot_thread and bot_thread.is_alive(): return
+    bot_thread = threading.Thread(target=run_bot_loop, daemon=True, name="bot-loop")
+    bot_thread.start()
+    async def initialize():
+        await bot_application.initialize()
+        await bot_application.start()
+        if PUBLIC_URL:
+            wh = "/telegram-webhook" + (("/" + WEBHOOK_SECRET_PATH) if WEBHOOK_SECRET_PATH else "")
+            await bot_application.bot.set_webhook(PUBLIC_URL + wh)
+    asyncio.run_coroutine_threadsafe(initialize(), bot_loop)
+
+start_bot()
+threading.Thread(target=game_loop_worker, daemon=True, name="game-loop").start()
+threading.Thread(target=auto_caller_loop, daemon=True, name="auto-caller").start()
 
 if __name__ == "__main__":
-    threading.Thread(target=game_loop_worker, daemon=True).start()
-    threading.Thread(target=auto_caller_loop, daemon=True).start()
-    threading.Thread(target=run_flask, daemon=True).start()
-
-    bot_loop.run_until_complete(bot_application.initialize())
-    bot_loop.run_until_complete(bot_application.start())
-    logger.info("Flash Bingo Bot started successfully.")
-    
-    try:
-        bot_loop.run_forever()
-    except (KeyboardInterrupt, SystemExit):
-        bot_loop.run_until_complete(bot_application.stop())
+    port = int(os.environ.get("PORT", "10000"))
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
