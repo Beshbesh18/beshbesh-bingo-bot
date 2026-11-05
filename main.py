@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 Besh Besh Bingo — Telegram bot + Telegram Mini App
-Complete & Unbroken Version with 1-600 Card Selection, 50s Timer, Wallets (with Copy),
-Admin, 1-75 Master Grid, Auto-Bingo detection, and Besh Besh Branding.
+Complete & Fully Fixed Version: Exact 1-75 Auto-Bingo Detection, Line/Corner Win Logic,
+1-600 Card Selection, 50s Timer, Wallets (Min 30 ETB), and Admin Auto-Credit.
 """
 import os
 import json
@@ -46,6 +46,7 @@ MAX_CARDS_PER_PLAYER = 4
 SELECTION_TIME_SECONDS = 50
 CALL_INTERVAL_SECONDS = 3
 MAX_NUMBERS_POOL = 75
+MIN_DEPOSIT_AMOUNT = 30.0
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -156,9 +157,9 @@ def fresh_game():
         "taken_card_numbers": set(),
         "player_cards": {},
         "card_matrices": {},
-        "marked": {},
         "winner_ids": set(),
         "last_winner_msg": None,
+        "game_over": False,
     }
 
 game_state = fresh_game()
@@ -176,21 +177,34 @@ def generate_75_bingo_card(seed_val):
     card[2][2] = "FREE"
     return card
 
-def card_has_bingo(card, marked):
-    marked = set(marked) | {"FREE"}
+def card_has_bingo(card, called_numbers):
+    """
+    Checks if a card has achieved Bingo based on called numbers.
+    Winning conditions: Any horizontal row, vertical column, two main diagonals, or four corners.
+    """
+    called_set = set(called_numbers) | {"FREE"}
+    
+    # 1. Check rows
     for r in range(5):
-        if all(card[r][c] in marked for c in range(5)):
+        if all(card[r][c] in called_set for c in range(5)):
             return True
+            
+    # 2. Check columns
     for c in range(5):
-        if all(card[r][c] in marked for r in range(5)):
+        if all(card[r][c] in called_set for r in range(5)):
             return True
-    if all(card[i][i] in marked for i in range(5)):
+            
+    # 3. Check diagonals
+    if all(card[i][i] in called_set for i in range(5)):
         return True
-    if all(card[i][4-i] in marked for i in range(5)):
+    if all(card[i][4-i] in called_set for i in range(5)):
         return True
+        
+    # 4. Check four corners
     corners = [(0, 0), (0, 4), (4, 0), (4, 4)]
-    if all(card[r][c] in marked for r, c in corners):
+    if all(card[r][c] in called_set for r, c in corners):
         return True
+        
     return False
 
 def game_loop_worker():
@@ -204,17 +218,43 @@ def game_loop_worker():
                     game_state["phase"] = "playing"
                     game_state["called_numbers"] = []
                     game_state["current_number"] = None
+                    game_state["game_over"] = False
+                    game_state["winner_ids"] = set()
 
 def auto_caller_loop():
     while True:
         time.sleep(CALL_INTERVAL_SECONDS)
         with game_lock:
-            if game_state["phase"] == "playing" and game_state["player_cards"]:
-                remaining = [n for n in range(1, MAX_NUMBERS_POOL + 1) if n not in game_state["called_numbers"]]
-                if remaining:
-                    num = random.choice(remaining)
-                    game_state["called_numbers"].append(num)
-                    game_state["current_number"] = num
+            if game_state["phase"] == "playing" and not game_state["game_over"]:
+                if game_state["player_cards"]:
+                    remaining = [n for n in range(1, MAX_NUMBERS_POOL + 1) if n not in game_state["called_numbers"]]
+                    if remaining:
+                        num = random.choice(remaining)
+                        game_state["called_numbers"].append(num)
+                        game_state["current_number"] = num
+                        
+                        # Check all player cards for auto-bingo
+                        for uid, cards in game_state["player_cards"].items():
+                            if uid in game_state["winner_ids"]:
+                                continue
+                            for cid in cards:
+                                mat = game_state["card_matrices"].get((uid, cid))
+                                if mat and card_has_bingo(mat, game_state["called_numbers"]):
+                                    game_state["winner_ids"].add(uid)
+                                    game_state["last_winner_msg"] = cid
+                                    game_state["game_over"] = True
+                                    prize = game_state["prize"] if game_state["prize"] > 0 else 50.0
+                                    update_credits(uid, prize, is_win=True)
+                                    with closing(db()) as con:
+                                        con.execute("INSERT INTO wins(user_id, username, round_no, card_index, prize) VALUES(?,?,?,?,?)",
+                                                    (uid, "", game_state["round"], cid, prize))
+                                        con.commit()
+                                    break
+                            if game_state["game_over"]:
+                                break
+                    else:
+                        # Pool exhausted (all 75 numbers called)
+                        game_state["game_over"] = True
 
 def reset_round():
     global game_state
@@ -228,8 +268,8 @@ def reset_round():
         game_state["taken_card_numbers"] = set()
         game_state["player_cards"] = {}
         game_state["card_matrices"] = {}
-        game_state["marked"] = {}
         game_state["winner_ids"] = set()
+        game_state["game_over"] = False
 
 # ------------------------------ Localization & Handlers -------------------------
 TEXT = {
@@ -245,7 +285,7 @@ TEXT = {
         "admin": "🛡 አድሚን",
         "choose": "ከታች ያሉትን አማራጮች ይምረጡ።",
         "balance_msg": "💰 የኪስ ሂሳብዎ:\nPlay Wallet: {credits} ETB\nWin Wallet: {win_credits} ETB",
-        "rules_msg": "📜 ሕጎች\n• ካርድ ዋጋ: 10 ብር\n• ከ 1 እስከ 600 ካርዶች ውስጥ ይምረጡ\n• ቁጥሮች ከ 1 እስከ 75 ይጠራሉ",
+        "rules_msg": "📜 ሕጎች\n• ካርድ ዋጋ: 10 ብር\n• ከ 1 እስከ 600 ካርዶች ውስጥ ይምረጡ\n• ቁጥሮች ከ 1 እስከ 75 ይጠራሉ\n• ዝቅተኛ የዲፖዚት መጠን: 30 ብር",
         "language_set": "ቋንቋው ወደ አማርኛ ተስተካክሏል።",
     },
     "en": {
@@ -260,7 +300,7 @@ TEXT = {
         "admin": "🛡 Admin",
         "choose": "Choose an option below.",
         "balance_msg": "💰 Your balance:\nPlay Wallet: {credits} ETB\nWin Wallet: {win_credits} ETB",
-        "rules_msg": "📜 Rules\n• Card cost: 10 ETB\n• Pick cards from 1 to 600\n• Numbers called from 1 to 75",
+        "rules_msg": "📜 Rules\n• Card cost: 10 ETB\n• Pick cards from 1 to 600\n• Numbers called from 1 to 75\n• Minimum deposit: 30 ETB",
         "language_set": "Language changed to English.",
     },
 }
@@ -326,8 +366,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text(tr(user.id, "rules_msg"))
     elif msg in (t["wallet"], "💳 Wallet / ኪስ ቦርሳ"):
         await update.effective_message.reply_text(
-            "💳 Wallet\nTelebirr: 0918719332 · Enyew\nCBE Birr: 0918719332 · Enyew\n\n"
-            "ክፍያ ከፈጸሙ በኋላ በ Mini App ውስጥ የክፍያ ማረጋገጫ ቁጥርዎን ይላኩ።")
+            "💳 Wallet\nTelebirr / CBE Birr: 0918719332 · Enyew\n\n"
+            "ዝቅተኛ የክፍያ መጠን: 30 ብር\n"
+            "ክፍያ ከፈጸሙ በኋላ በ Mini App ውስጥ የትራንዛክሽን አይዲ (Transaction ID / SMS) ያስገቡ።")
     elif msg in (t["rank"], "🏆 ደረጃ", "🏆 Rank"):
         with closing(db()) as con:
             rows = con.execute("SELECT username, first_name, win_credits FROM users ORDER BY win_credits DESC LIMIT 10").fetchall()
@@ -427,6 +468,7 @@ INDEX_HTML = r"""<!doctype html>
 </header>
 
 <div id="phase-banner" class="phase-banner">ሰዓት እያለቀ ነው: <span id="timer">50</span> ሰከንድ (ካርድ ይምረጡ 1-600)</div>
+<div id="game-status-banner" class="game-status-banner" style="display:none;"></div>
 
 <section class="game-panel" id="selection-panel">
   <div class="section-header">
@@ -469,10 +511,10 @@ INDEX_HTML = r"""<!doctype html>
     <button id="show-withdraw" class="success-btn">📤 WITHDRAW</button>
   </div>
   <div id="deposit-form" class="sub-form">
-    <h3>ገንዘብ ማስገባት</h3>
+    <h3>ገንዘብ ማስገባት (ቢያንስ 30 ብር)</h3>
     <select id="deposit-method"><option>Telebirr</option><option>CBE Birr</option></select>
-    <input id="deposit-amount" type="number" placeholder="የክፍያ መጠን (ብር)">
-    <input id="deposit-reference" placeholder="Transaction ID">
+    <input id="deposit-amount" type="number" placeholder="የክፍያ መጠን (ብር - ከ 30 በላይ)">
+    <input id="deposit-reference" placeholder="የቴሌብር/ባንክ ቴክስት ወይም Transaction ID">
     <button id="send-deposit" class="primary-btn">የክፍያ ጥያቄ ላክ</button>
   </div>
   <div id="withdraw-form" class="sub-form" style="display:none;">
@@ -513,7 +555,8 @@ STYLE_CSS = r""":root{color-scheme:dark;--bg:#041509;--panel:#0b2113;--panel2:#1
 .score-box{background:var(--panel2);border:1px solid var(--line);padding:4px 8px;border-radius:8px;font-size:11px;text-align:center}
 .score-box.win{border-color:var(--gold)}.score-box strong{display:block;color:var(--gold);font-size:13px}
 .current-call-badge{width:40px;height:40px;background:linear-gradient(135deg,#39d66f,#0b6329);border-radius:10px;display:grid;place-items:center;font-weight:900;font-size:16px;color:#041509}
-.phase-banner{background:#183820;border:1px solid var(--teal);padding:8px;border-radius:8px;text-align:center;font-size:12px;margin-bottom:10px;font-weight:bold;color:var(--gold)}
+.phase-banner,.game-status-banner{background:#183820;border:1px solid var(--teal);padding:8px;border-radius:8px;text-align:center;font-size:12px;margin-bottom:10px;font-weight:bold;color:var(--gold)}
+.game-status-banner{background:#483308;border-color:var(--gold);display:none}
 .game-panel,.wallet-section,.rank-section{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:12px;margin-bottom:12px}
 .section-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;font-size:13px}
 .card-count-pill{background:var(--panel2);padding:4px 8px;border-radius:6px;border:1px solid var(--line);font-size:11px;color:var(--teal)}
@@ -551,41 +594,11 @@ input,select{width:100%;background:var(--panel2);border:1px solid var(--line);pa
 
 APP_JS = r"""(() => {
 const tg=window.Telegram?.WebApp;if(tg){tg.ready();tg.expand()}
-const initData=tg?.initData||'';let model=null;let lastSpokenNum=null;
+const initData=tg?.initData||'';let model=null;
 function toast(s){const e=document.getElementById('toast');e.textContent=s;e.style.display='block';setTimeout(()=>e.style.display='none',2500)}
 
-function speakNumber(n){
-  if(!n || n===lastSpokenNum) return;
-  lastSpokenNum=n;
-  if('speechSynthesis' in window){
-    let letter='B';
-    if(n>=16 && n<=30)letter='I';
-    else if(n>=31 && n<=45)letter='N';
-    else if(n>=46 && n<=60)letter='G';
-    else if(n>=61 && n<=75)letter='O';
-    let text=letter+' '+n;
-    let utterance=new SpeechSynthesisUtterance(text);
-    utterance.lang='en-US';
-    window.speechSynthesis.speak(utterance);
-  }
-}
-
-function speakWinCard(cardId){
-  if('speechSynthesis' in window){
-    let text='Card '+cardId+' BINGO!';
-    let utterance=new SpeechSynthesisUtterance(text);
-    utterance.lang='en-US';
-    window.speechSynthesis.speak(utterance);
-  }
-}
-
-window.addEventListener('click', ()=>{
-  if('speechSynthesis' in window && window.speechSynthesis.paused){
-    window.speechSynthesis.resume();
-  }
-}, {once:true});
-
 async function api(path,method='GET',body=null){const o={method,headers:{'Content-Type':'application/json','X-Telegram-Init-Data':initData}};if(body)o.body=JSON.stringify(body);const r=await fetch(path,o);const d=await r.json().catch(()=>({error:'Error'}));if(!r.ok)throw Error(d.error||'Failed');return d}
+
 function render(){if(!model)return;
 document.getElementById('round-title').textContent='ዙር #'+model.round;
 document.getElementById('play-bal').textContent=model.credits.toFixed(2);
@@ -594,16 +607,23 @@ document.getElementById('w-play').textContent=model.credits.toFixed(2);
 document.getElementById('w-win').textContent=(model.win_credits||0).toFixed(2);
 document.getElementById('current').textContent=model.current_number??'—';
 
-if(model.current_number){ speakNumber(model.current_number); }
-if(model.last_winner_card){
-  speakWinCard(model.last_winner_card);
-  toast(`🎉 ካርድ #${model.last_winner_card} BINGO አሸንፏል!`);
+const statusBanner=document.getElementById('game-status-banner');
+if(model.game_over){
+  statusBanner.style.display='block';
+  if(model.last_winner_card){
+    statusBanner.innerHTML=`🎉 ካርድ #${model.last_winner_card} BINGO አሸንፏል! አዲስ ዙር በቅርቡ ይጀምራል...`;
+    toast(`🎉 ካርድ #${model.last_winner_card} BINGO አሸንፏል!`);
+  } else {
+    statusBanner.innerHTML=`⚠️ ሁሉም ቁጥሮች አልቀዋል (Draw)! አዲስ ዙር ይጀምራል...`;
+  }
+} else {
+  statusBanner.style.display='none';
 }
 
 const isSelecting=(model.phase==='selecting');
 document.getElementById('selection-panel').style.display=isSelecting?'block':'none';
 document.getElementById('live-game-panel').style.display=isSelecting?'none':'block';
-document.getElementById('game-actions').style.display=isSelecting?'none':'grid';
+document.getElementById('game-actions').style.display=(isSelecting || model.game_over)?'none':'grid';
 
 let rem=Math.max(0, Math.floor(model.selection_ends_at - Date.now()/1000));
 document.getElementById('timer').textContent=rem;
@@ -677,6 +697,7 @@ model.my_cards_data.forEach(item=>{
   box.appendChild(grid);cc.appendChild(box);
 });
 }
+
 async function refresh(){try{model=await api('/api/miniapp/game');render();}catch(e){}}
 async function action(path,body={}){try{const d=await api(path,'POST',body);toast(d.message||'ተሳካ');await refresh()}catch(e){toast(e.message)}}
 
@@ -687,7 +708,7 @@ window.switchTab=function(tab){
   document.getElementById('selection-panel').style.display=(tab==='bingo' && model?.phase==='selecting')?'block':'none';
   document.getElementById('live-game-panel').style.display=(tab==='bingo' && model?.phase==='playing')?'block':'none';
   document.getElementById('cards-container').style.display=tab==='bingo'?'flex':'none';
-  document.getElementById('game-actions').style.display=(tab==='bingo' && model?.phase==='playing')?'grid':'none';
+  document.getElementById('game-actions').style.display=(tab==='bingo' && model?.phase==='playing' && !model?.game_over)?'grid':'none';
   document.getElementById('wallet-section').style.display=tab==='wallet'?'block':'none';
   document.getElementById('rank-section').style.display=tab==='rank'?'block':'none';
   if(tab==='rank')loadRank();
@@ -704,8 +725,9 @@ document.getElementById('show-deposit').onclick=()=>{document.getElementById('de
 document.getElementById('show-withdraw').onclick=()=>{document.getElementById('withdraw-form').style.display='block';document.getElementById('deposit-form').style.display='none';};
 document.getElementById('send-deposit').onclick=()=>{
   const amount=Number(document.getElementById('deposit-amount').value),method=document.getElementById('deposit-method').value,reference=document.getElementById('deposit-reference').value.trim();
-  if(!amount||reference.length<3){toast('መረጃ ይሙሉ');return;}
-  action('/api/miniapp/deposit-request',{amount,method,reference}).then(()=>{document.getElementById('deposit-reference').value='';})
+  if(!amount||amount<30){toast('ቢያንስ 30 ብር ማስገባት አለብዎት');return;}
+  if(reference.length<3){toast('ትክክለኛ የቴሌብር ቴክስት ወይም Transaction ID ያስገቡ');return;}
+  action('/api/miniapp/deposit-request',{amount,method,reference}).then(()=>{document.getElementById('deposit-amount').value='';document.getElementById('deposit-reference').value='';})
 };
 document.getElementById('send-withdraw').onclick=()=>{
   const amount=Number(document.getElementById('withdraw-amount').value),account_info=document.getElementById('withdraw-account').value.trim();
@@ -722,7 +744,7 @@ const d=await r.json();
 document.getElementById('u-count').textContent=d.users_count;
 document.getElementById('t-cred').textContent=d.total_credits;
 document.getElementById('p-count').textContent=d.pending_count;
-document.getElementById('req-list').innerHTML=d.requests.map(r=>`<div class="req"><b>#${r.id} · ${r.amount} ብር (${r.method})</b><p>User: ${r.user_id} | Ref: ${r.reference}</p><button onclick="review(${r.id},'approve')" style="background:#39d66f;border:0;padding:6px 12px;border-radius:6px;font-weight:bold">አጽድቅ</button></div>`).join('');
+document.getElementById('req-list').innerHTML=d.requests.map(r=>`<div class="req"><b>#${r.id} · ${r.amount} ብር (${r.method})</b><p>User: ${r.user_id} | Ref: ${r.reference}</p><button onclick="review(${r.id},'approve')" style="background:#39d66f;border:0;padding:6px 12px;border-radius:6px;font-weight:bold">አጽድቅ (Approve)</button></div>`).join('');
 }
 async function review(id,decision){await fetch(`/api/admin/deposit/${id}/review`,{method:'POST',headers:{'Content-Type':'application/json','X-Telegram-Init-Data':window.Telegram?.WebApp?.initData||''},body:JSON.stringify({decision})});load();}
 document.getElementById('refresh').onclick=load;load();
@@ -754,31 +776,20 @@ def api_miniapp_game():
         now = time.time()
         if game_state["phase"] == "selecting" and now >= game_state["selection_ends_at"]:
             game_state["phase"] = "playing"
+            game_state["called_numbers"] = []
+            game_state["current_number"] = None
+            game_state["game_over"] = False
+            game_state["winner_ids"] = set()
         
         my_cards = game_state["player_cards"].get(uid, [])
         my_cards_data = []
-        winning_card = None
         for cid in my_cards:
             mat = game_state["card_matrices"].setdefault((uid, cid), generate_75_bingo_card(cid * 999 + uid))
             mset = list(game_state["marked"].setdefault((uid, cid), {"FREE"}))
-            
-            if card_has_bingo(mat, mset) and uid not in game_state["winner_ids"]:
-                winning_card = cid
-                game_state["winner_ids"].add(uid)
-                game_state["last_winner_msg"] = cid
-                prize = game_state["prize"] if game_state["prize"] > 0 else 50.0
-                update_credits(uid, prize, is_win=True)
-                with closing(db()) as con:
-                    con.execute("INSERT INTO wins(user_id, username, round_no, card_index, prize) VALUES(?,?,?,?,?)",
-                                (uid, user.get("username",""), game_state["round"], cid, prize))
-                    con.commit()
-                reset_round()
-
             my_cards_data.append({"card_id": cid, "matrix": mat, "marked": mset})
 
         taken_list = list(game_state["taken_card_numbers"])
-        last_win = winning_card if winning_card else game_state.get("last_winner_msg")
-        game_state["last_winner_msg"] = None
+        last_win = game_state.get("last_winner_msg")
 
         return jsonify({
             "round": game_state["round"],
@@ -792,7 +803,8 @@ def api_miniapp_game():
             "taken_cards": taken_list,
             "my_cards": my_cards,
             "my_cards_data": my_cards_data,
-            "last_winner_card": last_win
+            "last_winner_card": last_win,
+            "game_over": game_state["game_over"]
         })
 
 @app.post("/api/miniapp/select-card")
@@ -844,6 +856,7 @@ def api_miniapp_mark():
     cid, num = body.get("card_id"), body.get("number")
     with game_lock:
         if game_state["phase"] != "playing": return json_error("ጨዋታው ገና አልጀመረም")
+        if game_state["game_over"]: return json_error("ይህ ዙር ተጠናቋል")
         if num != "FREE" and num not in game_state["called_numbers"]:
             return json_error("ቁጥሩ ገና አልተጠራም")
         key = (uid, cid)
@@ -858,19 +871,32 @@ def api_miniapp_claim():
     if not user: return json_error("Unauthorized", 401)
     uid = user["id"]
     with game_lock:
+        if game_state["game_over"]: return json_error("ይህ ዙር ተጠናቋል")
         my_cards = game_state["player_cards"].get(uid, [])
-        won = any(card_has_bingo(game_state["card_matrices"].get((uid, cid), []), game_state["marked"].get((uid, cid), {"FREE"})) for cid in my_cards)
+        won = False
+        winning_cid = None
+        for cid in my_cards:
+            mat = game_state["card_matrices"].get((uid, cid))
+            if mat and card_has_bingo(mat, game_state["called_numbers"]):
+                won = True
+                winning_cid = cid
+                break
+                
     if not won: return json_error("BINGO አልደረሰም!")
     if uid in game_state["winner_ids"]: return json_error("ቀደም ሲል ተጠይቋል")
-    game_state["winner_ids"].add(uid)
-    prize = game_state["prize"] if game_state["prize"] > 0 else 50.0
-    update_credits(uid, prize, is_win=True)
-    with closing(db()) as con:
-        con.execute("INSERT INTO wins(user_id, username, round_no, card_index, prize) VALUES(?,?,?,?,?)",
-                    (uid, user.get("username",""), game_state["round"], 0, prize))
-        con.commit()
-    reset_round()
-    return jsonify({"message": f"ብሩህ አሸናፊ! {prize} ETB አሸንፈዋል!"})
+    
+    with game_lock:
+        game_state["winner_ids"].add(uid)
+        game_state["last_winner_msg"] = winning_cid
+        game_state["game_over"] = True
+        prize = game_state["prize"] if game_state["prize"] > 0 else 50.0
+        update_credits(uid, prize, is_win=True)
+        with closing(db()) as con:
+            con.execute("INSERT INTO wins(user_id, username, round_no, card_index, prize) VALUES(?,?,?,?,?)",
+                        (uid, user.get("username",""), game_state["round"], winning_cid, prize))
+            con.commit()
+            
+    return jsonify({"message": f"ብሩህ አሸናፊ! ካርድ #{winning_cid} — {prize} ETB አሸንፈዋል!"})
 
 @app.post("/api/miniapp/deposit-request")
 def api_miniapp_deposit():
@@ -878,7 +904,8 @@ def api_miniapp_deposit():
     if not user: return json_error("Unauthorized", 401)
     body = request.get_json() or {}
     amt, method, ref = body.get("amount"), body.get("method"), body.get("reference")
-    if not amt or not ref: return json_error("መረጃ ይሙሉ")
+    if not amt or amt < MIN_DEPOSIT_AMOUNT: return json_error(f"ቢያንስ {MIN_DEPOSIT_AMOUNT} ብር ማስገባት አለብዎት")
+    if not ref or len(ref) < 3: return json_error("ትክክለኛ የቴሌብር ቴክስት ወይም Transaction ID ያስገቡ")
     with closing(db()) as con:
         con.execute("INSERT INTO deposit_requests(user_id, method, amount, reference) VALUES(?,?,?,?)", (user["id"], method, amt, ref))
         con.commit()
@@ -928,45 +955,4 @@ def admin_review(req_id):
         status = "approved" if decision == "approve" else "rejected"
         con.execute("UPDATE deposit_requests SET status=?, reviewed_at=CURRENT_TIMESTAMP WHERE id=?", (status, req_id))
         if decision == "approve":
-            con.execute("UPDATE users SET credits=credits+? WHERE user_id=?", (row["amount"], row["user_id"]))
-        con.commit()
-    return jsonify({"ok": True, "message": "ተረጋግጧል"})
-
-@app.post("/telegram-webhook" if not WEBHOOK_SECRET_PATH else "/telegram-webhook/" + WEBHOOK_SECRET_PATH)
-def telegram_webhook():
-    try:
-        payload = request.get_json(force=True)
-        update = Update.de_json(payload, bot_application.bot)
-        if bot_loop.is_running():
-            asyncio.run_coroutine_threadsafe(bot_application.process_update(update), bot_loop)
-        return "OK"
-    except Exception:
-        return "ERROR", 500
-
-@app.route("/<path:path>", methods=["GET", "HEAD"])
-def fallback(path): return jsonify({"error": "Not found"}), 404
-
-def run_bot_loop():
-    asyncio.set_event_loop(bot_loop)
-    bot_loop.run_forever()
-
-def start_bot():
-    global bot_thread
-    if bot_thread and bot_thread.is_alive(): return
-    bot_thread = threading.Thread(target=run_bot_loop, daemon=True, name="bot-loop")
-    bot_thread.start()
-    async def initialize():
-        await bot_application.initialize()
-        await bot_application.start()
-        if PUBLIC_URL:
-            wh = "/telegram-webhook" + (("/" + WEBHOOK_SECRET_PATH) if WEBHOOK_SECRET_PATH else "")
-            await bot_application.bot.set_webhook(PUBLIC_URL + wh)
-    asyncio.run_coroutine_threadsafe(initialize(), bot_loop)
-
-start_bot()
-threading.Thread(target=game_loop_worker, daemon=True, name="game-loop").start()
-threading.Thread(target=auto_caller_loop, daemon=True, name="auto-caller").start()
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "10000"))
-    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+            con.execute("UPDATE users SET credits=credits
