@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 Flash Bingo — Telegram bot + Telegram Mini App
-Complete Version with 1-600 Card Selection, 50s Timer, Wallets, Admin,
-Voice Calling, and Full Bingo Winning Patterns (Lines, Diagonals, Corners).
+Complete & Unbroken Version with 1-600 Card Selection, 50s Timer, Wallets, Admin,
+1-75 Master Grid, Voice Calling, and Specific Card Win Announcement (#85, #20, etc.).
 """
 import os
 import json
@@ -158,6 +158,7 @@ def fresh_game():
         "card_matrices": {},
         "marked": {},
         "winner_ids": set(),
+        "last_winner_msg": None,
     }
 
 game_state = fresh_game()
@@ -562,6 +563,15 @@ function speakNumber(n){
   }
 }
 
+function speakWinCard(cardId){
+  if('speechSynthesis' in window){
+    let text='Card '+cardId+' BINGO!';
+    let utterance=new SpeechSynthesisUtterance(text);
+    utterance.lang='en-US';
+    window.speechSynthesis.speak(utterance);
+  }
+}
+
 window.addEventListener('click', ()=>{
   if('speechSynthesis' in window && window.speechSynthesis.paused){
     window.speechSynthesis.resume();
@@ -578,6 +588,10 @@ document.getElementById('w-win').textContent=(model.win_credits||0).toFixed(2);
 document.getElementById('current').textContent=model.current_number??'—';
 
 if(model.current_number){ speakNumber(model.current_number); }
+if(model.last_winner_card){
+  speakWinCard(model.last_winner_card);
+  toast(`ካርድ #${model.last_winner_card} BINGO አሸንፏል!`);
+}
 
 const isSelecting=(model.phase==='selecting');
 document.getElementById('selection-panel').style.display=isSelecting?'block':'none';
@@ -731,12 +745,15 @@ def api_miniapp_game():
         
         my_cards = game_state["player_cards"].get(uid, [])
         my_cards_data = []
+        winning_card = None
         for cid in my_cards:
             mat = game_state["card_matrices"].setdefault((uid, cid), generate_75_bingo_card(cid * 999 + uid))
             mset = list(game_state["marked"].setdefault((uid, cid), {"FREE"}))
             
             if card_has_bingo(mat, mset) and uid not in game_state["winner_ids"]:
+                winning_card = cid
                 game_state["winner_ids"].add(uid)
+                game_state["last_winner_msg"] = cid
                 prize = game_state["prize"] if game_state["prize"] > 0 else 50.0
                 update_credits(uid, prize, is_win=True)
                 with closing(db()) as con:
@@ -748,6 +765,8 @@ def api_miniapp_game():
             my_cards_data.append({"card_id": cid, "matrix": mat, "marked": mset})
 
         taken_list = list(game_state["taken_card_numbers"])
+        last_win = winning_card if winning_card else game_state.get("last_winner_msg")
+        game_state["last_winner_msg"] = None
 
         return jsonify({
             "round": game_state["round"],
@@ -760,7 +779,8 @@ def api_miniapp_game():
             "win_credits": row["win_credits"] if row else 0.0,
             "taken_cards": taken_list,
             "my_cards": my_cards,
-            "my_cards_data": my_cards_data
+            "my_cards_data": my_cards_data,
+            "last_winner_card": last_win
         })
 
 @app.post("/api/miniapp/select-card")
