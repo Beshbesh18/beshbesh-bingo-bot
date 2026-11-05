@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Besh Besh Bingo — Telegram bot + Telegram Mini App
-Complete & Fully Fixed Version: Exact 1-75 Auto-Bingo Detection, Line/Corner Win Logic,
+Complete, Clean & Fully Fixed Version: Exact 1-75 Pool Limit, Auto-Bingo Detection,
 1-600 Card Selection, 50s Timer, Wallets (Min 30 ETB), and Admin Auto-Credit.
 """
 import os
@@ -178,33 +178,24 @@ def generate_75_bingo_card(seed_val):
     return card
 
 def card_has_bingo(card, called_numbers):
-    """
-    Checks if a card has achieved Bingo based on called numbers.
-    Winning conditions: Any horizontal row, vertical column, two main diagonals, or four corners.
-    """
     called_set = set(called_numbers) | {"FREE"}
-    
-    # 1. Check rows
+    # Rows
     for r in range(5):
         if all(card[r][c] in called_set for c in range(5)):
             return True
-            
-    # 2. Check columns
+    # Columns
     for c in range(5):
         if all(card[r][c] in called_set for r in range(5)):
             return True
-            
-    # 3. Check diagonals
+    # Diagonals
     if all(card[i][i] in called_set for i in range(5)):
         return True
     if all(card[i][4-i] in called_set for i in range(5)):
         return True
-        
-    # 4. Check four corners
+    # Corners
     corners = [(0, 0), (0, 4), (4, 0), (4, 4)]
     if all(card[r][c] in called_set for r, c in corners):
         return True
-        
     return False
 
 def game_loop_worker():
@@ -233,7 +224,7 @@ def auto_caller_loop():
                         game_state["called_numbers"].append(num)
                         game_state["current_number"] = num
                         
-                        # Check all player cards for auto-bingo
+                        # Check auto-bingo for all players
                         for uid, cards in game_state["player_cards"].items():
                             if uid in game_state["winner_ids"]:
                                 continue
@@ -614,7 +605,7 @@ if(model.game_over){
     statusBanner.innerHTML=`🎉 ካርድ #${model.last_winner_card} BINGO አሸንፏል! አዲስ ዙር በቅርቡ ይጀምራል...`;
     toast(`🎉 ካርድ #${model.last_winner_card} BINGO አሸንፏል!`);
   } else {
-    statusBanner.innerHTML=`⚠️ ሁሉም ቁጥሮች አልቀዋል (Draw)! አዲስ ዙር ይጀምራል...`;
+    statusBanner.innerHTML=`⚠️ ሁሉም 75 ቁጥሮች አልቀዋል (Draw)! አዲስ ዙር ይጀምራል...`;
   }
 } else {
   statusBanner.style.display='none';
@@ -781,6 +772,13 @@ def api_miniapp_game():
             game_state["game_over"] = False
             game_state["winner_ids"] = set()
         
+        # Check if game over, auto reset round after 8 seconds
+        if game_state["game_over"]:
+            if "game_over_time" not in game_state:
+                game_state["game_over_time"] = now
+            elif now - game_state["game_over_time"] > 8.0:
+                reset_round()
+
         my_cards = game_state["player_cards"].get(uid, [])
         my_cards_data = []
         for cid in my_cards:
@@ -889,6 +887,7 @@ def api_miniapp_claim():
         game_state["winner_ids"].add(uid)
         game_state["last_winner_msg"] = winning_cid
         game_state["game_over"] = True
+        game_state["game_over_time"] = time.time()
         prize = game_state["prize"] if game_state["prize"] > 0 else 50.0
         update_credits(uid, prize, is_win=True)
         with closing(db()) as con:
@@ -955,4 +954,45 @@ def admin_review(req_id):
         status = "approved" if decision == "approve" else "rejected"
         con.execute("UPDATE deposit_requests SET status=?, reviewed_at=CURRENT_TIMESTAMP WHERE id=?", (status, req_id))
         if decision == "approve":
-            con.execute("UPDATE users SET credits=credits
+            con.execute("UPDATE users SET credits=credits+? WHERE user_id=?", (row["amount"], row["user_id"]))
+        con.commit()
+    return jsonify({"ok": True, "message": "ተረጋግጧል እና ብሩ ወደ ተጫዋቹ ዋሌት ገብቷል"})
+
+@app.post("/telegram-webhook" if not WEBHOOK_SECRET_PATH else "/telegram-webhook/" + WEBHOOK_SECRET_PATH)
+def telegram_webhook():
+    try:
+        payload = request.get_json(force=True)
+        update = Update.de_json(payload, bot_application.bot)
+        if bot_loop.is_running():
+            asyncio.run_coroutine_threadsafe(bot_application.process_update(update), bot_loop)
+        return "OK"
+    except Exception:
+        return "ERROR", 500
+
+@app.route("/<path:path>", methods=["GET", "HEAD"])
+def fallback(path): return jsonify({"error": "Not found"}), 404
+
+def run_bot_loop():
+    asyncio.set_event_loop(bot_loop)
+    bot_loop.run_forever()
+
+def start_bot():
+    global bot_thread
+    if bot_thread and bot_thread.is_alive(): return
+    bot_thread = threading.Thread(target=run_bot_loop, daemon=True, name="bot-loop")
+    bot_thread.start()
+    async def initialize():
+        await bot_application.initialize()
+        await bot_application.start()
+        if PUBLIC_URL:
+            wh = "/telegram-webhook" + (("/" + WEBHOOK_SECRET_PATH) if WEBHOOK_SECRET_PATH else "")
+            await bot_application.bot.set_webhook(PUBLIC_URL + wh)
+    asyncio.run_coroutine_threadsafe(initialize(), bot_loop)
+
+start_bot()
+threading.Thread(target=game_loop_worker, daemon=True, name="game-loop").start()
+threading.Thread(target=auto_caller_loop, daemon=True, name="auto-caller").start()
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", "10000"))
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
