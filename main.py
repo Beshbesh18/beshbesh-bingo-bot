@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Flash Bingo — Telegram bot + Telegram Mini App
+Bash Bash Bingo — Telegram bot + Telegram Mini App
 1-600 Card Selection (50s timer), 1-75 Master Grid & Cards,
 Play/Win Wallets, Deposit/Withdraw, Line Bingo check, and Voice Number Calling.
 
@@ -54,7 +54,7 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
-logger = logging.getLogger("flash-bingo")
+logger = logging.getLogger("bash-bash-bingo")
 
 if not TOKEN:
     raise RuntimeError("Set the TOKEN environment variable to your Telegram bot token.")
@@ -286,8 +286,8 @@ def auto_caller_loop():
 # ------------------------------ Localization & Handlers -------------------------
 TEXT = {
     "am": {
-        "welcome": "🎰 እንኳን ደህና መጡ ወደ Flash Bingo!\n\nአማራጭ እና ፈጣን የቢንጎ ጨዋታ መድረክ",
-        "play": "🎮 Flash Bingo ጨዋታ",
+        "welcome": "🎰 እንኳን ደህና መጡ ወደ በሽ በሽ ቢንጎ!\n\nአማራጭ እና ፈጣን የቢንጎ ጨዋታ መድረክ",
+        "play": "🎮 በሽ በሽ ቢንጎ ጨዋታ",
         "balance": "💰 ብር ሂሳብ",
         "rules": "📜 ሕግ እና ደንቦች",
         "wallet": "💳 Wallet / አካውንት ብር",
@@ -301,8 +301,8 @@ TEXT = {
         "language_set": "ቋንቋው ወደ አማርኛ ተስተካክሏል።",
     },
     "en": {
-        "welcome": "🎰 Welcome to Flash Bingo!\n\nFast and exciting bingo gaming platform.",
-        "play": "🎮 Play Flash Bingo",
+        "welcome": "🎰 Welcome to Bash Bash Bingo!\n\nFast and exciting bingo gaming platform.",
+        "play": "🎮 Play Bash Bash Bingo",
         "balance": "💰 Balance",
         "rules": "📜 Rules",
         "wallet": "💳 Wallet",
@@ -341,7 +341,7 @@ def webapp_url():
 def start_keyboard():
     if PUBLIC_URL:
         return InlineKeyboardMarkup([[
-            InlineKeyboardButton("⚡ Flash Bingo ክፍት", web_app=WebAppInfo(url=webapp_url()))
+            InlineKeyboardButton("⚡ በሽ በሽ ቢንጎ ክፍት", web_app=WebAppInfo(url=webapp_url()))
         ]])
     return None
 
@@ -355,7 +355,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text(text, reply_markup=markup)
     else:
         await update.effective_message.reply_text(text)
-    await update.effective_message.reply_text("Flash Bingo ⚡", reply_markup=main_keyboard(user.id))
+    await update.effective_message.reply_text("በሽ በሽ ቢንጎ ⚡", reply_markup=main_keyboard(user.id))
 
 
 async def language_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -375,10 +375,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = get_language(user.id)
     t = TEXT.get(lang, TEXT["am"])
 
-    if msg in (t["play"], "🎮 Flash Bingo ጨዋታ", "🎮 Play Flash Bingo"):
+    if msg in (t["play"], "🎮 በሽ በሽ ቢንጎ ጨዋታ", "🎮 Play Bash Bash Bingo"):
         markup = start_keyboard()
         if markup:
-            await update.effective_message.reply_text("Flash Bingo ⚡", reply_markup=markup)
+            await update.effective_message.reply_text("በሽ በሽ ቢንጎ ⚡", reply_markup=markup)
         else:
             await update.effective_message.reply_text("Set RENDER_EXTERNAL_URL to enable the Mini App.")
     elif msg in (t["balance"], "💰 ብር ሂሳብ", "💰 Balance"):
@@ -396,7 +396,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             rows = con.execute(
                 "SELECT username, first_name, win_credits FROM users ORDER BY win_credits DESC LIMIT 10"
             ).fetchall()
-        lines = ["🏆 Top Flash Players"]
+        lines = ["🏆 Top Bash Players"]
         for i, r in enumerate(rows, 1):
             name = ("@" + r["username"]) if r["username"] else (r["first_name"] or "Player")
             lines.append(f"{i}. {name} — {r['win_credits']} ETB")
@@ -416,7 +416,7 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if PUBLIC_URL:
         keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("🛡 Open Flash Admin Panel", web_app=WebAppInfo(url=PUBLIC_URL + "/admin"))
+            InlineKeyboardButton("🛡 Open Bash Admin Panel", web_app=WebAppInfo(url=PUBLIC_URL + "/admin"))
         ]])
         await update.effective_message.reply_text("🛡 Admin panel", reply_markup=keyboard)
     else:
@@ -499,10 +499,10 @@ def to_positive_float(value):
 
 # ------------------------------ HTML & JS Assets ---------------------------
 INDEX_HTML = r"""<!doctype html>
-<html lang="am"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="theme-color" content="#06180d"><title>Flash Bingo</title><script src="https://telegram.org/js/telegram-web-app.js"></script><link rel="stylesheet" href="/static/style.css"></head>
+<html lang="am"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="theme-color" content="#06180d"><title>በሽ በሽ ቢንጎ</title><script src="https://telegram.org/js/telegram-web-app.js"></script><link rel="stylesheet" href="/static/style.css"></head>
 <body><main class="app-shell">
 <header class="topbar">
-  <div class="brand-info"><div class="eyebrow">⚡ FLASH BINGO</div><h1 id="round-title">ዙር #1</h1></div>
+  <div class="brand-info"><div class="eyebrow">⚡ በሽ በሽ ቢንጎ</div><h1 id="round-title">ዙር #1</h1></div>
   <div class="top-scores">
     <div class="score-box"><span>PLAY</span><strong id="play-bal">0.00</strong></div>
     <div class="score-box win"><span>WIN</span><strong id="win-bal">0.00</strong></div>
@@ -572,8 +572,8 @@ INDEX_HTML = r"""<!doctype html>
 </nav>
 </main><div id="toast"></div><script src="/static/app.js"></script></body></html>"""
 
-ADMIN_HTML = r"""<!doctype html><html lang="am"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Flash Bingo Admin</title><script src="https://telegram.org/js/telegram-web-app.js"></script><link rel="stylesheet" href="/static/style.css"><style>.admin{max-width:700px;margin:auto;padding:16px}.req{background:#0b2113;border:1px solid #20552d;padding:12px;border-radius:10px;margin-bottom:10px}.req span{display:block;font-size:11px;color:#a3b8a8}</style></head>
-<body class="admin"><header><h1>🛡 Flash Bingo አድሚን ፓነል</h1><button id="refresh" class="primary-btn">🔄 አዲስ</button></header>
+ADMIN_HTML = r"""<!doctype html><html lang="am"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>በሽ በሽ ቢንጎ አድሚን</title><script src="https://telegram.org/js/telegram-web-app.js"></script><link rel="stylesheet" href="/static/style.css"><style>.admin{max-width:700px;margin:auto;padding:16px}.req{background:#0b2113;border:1px solid #20552d;padding:12px;border-radius:10px;margin-bottom:10px}.req span{display:block;font-size:11px;color:#a3b8a8}</style></head>
+<body class="admin"><header><h1>🛡 በሽ በሽ ቢንጎ አድሚን ፓነል</h1><button id="refresh" class="primary-btn">🔄 አዲስ</button></header>
 <section style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:15px 0">
   <div class="req"><span>ተወዳዳሪዎች</span><strong id="u-count">—</strong></div>
   <div class="req"><span>ጠቅላላ ብር</span><strong id="t-cred">—</strong></div>
