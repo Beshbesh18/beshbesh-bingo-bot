@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 Flash Bingo — Telegram bot + Telegram Mini App
-Updated with 1-600 Card Selection (50s timer), 1-75 Card Number Pool (5x5 matrix),
-Play/Win Wallets, Deposit/Withdraw, and Rank features.
+Updated with 1-600 Card Selection (50s timer), 1-75 Master Grid & Cards,
+Play/Win Wallets, Deposit/Withdraw, Line Bingo check, and Voice Number Calling.
 """
 import os
 import json
@@ -154,7 +154,7 @@ def fresh_game():
         "called_numbers": [],
         "current_number": None,
         "taken_card_numbers": set(),  # 1 to 600 numbers chosen by players
-        "player_cards": {},           # user_id -> list of chosen card IDs (e.g. [54, 200])
+        "player_cards": {},           # user_id -> list of chosen card IDs
         "card_matrices": {},          # (user_id, card_id) -> 5x5 grid (1-75)
         "marked": {},                 # (user_id, card_id) -> set of marked numbers/FREE
         "winner_ids": set(),
@@ -177,12 +177,15 @@ def generate_75_bingo_card(seed_val):
 
 def card_has_bingo(card, marked):
     marked = set(marked) | {"FREE"}
+    # Horizontal lines
     for r in range(5):
         if all(card[r][c] in marked for c in range(5)):
             return True
+    # Vertical lines
     for c in range(5):
         if all(card[r][c] in marked for r in range(5)):
             return True
+    # Diagonal lines
     if all(card[i][i] in marked for i in range(5)):
         return True
     if all(card[i][4-i] in marked for i in range(5)):
@@ -437,7 +440,9 @@ INDEX_HTML = r"""<!doctype html>
     <h2>የተጠሩ ቁጥሮች (1 - 75)</h2>
     <span class="card-count-pill" id="card-count">ካርዶች: 0</span>
   </div>
+  <div class="bingo-header-labels"><span>B</span><span>I</span><span>N</span><span>G</span><span>O</span></div>
   <div class="master-grid-75" id="master-grid-75"></div>
+  <div class="called-balls-row" id="called-balls-row"></div>
 </section>
 
 <section class="cards-section" id="cards-container"></section>
@@ -506,12 +511,15 @@ STYLE_CSS = r""":root{color-scheme:dark;--bg:#041509;--panel:#0b2113;--panel2:#1
 .section-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;font-size:13px}
 .card-count-pill{background:var(--panel2);padding:4px 8px;border-radius:6px;border:1px solid var(--line);font-size:11px;color:var(--teal)}
 .master-grid{display:grid;grid-template-columns:repeat(15,1fr);gap:2px;max-height:220px;overflow-y:auto;background:#06180d;padding:6px;border-radius:10px;border:1px solid var(--line)}
-.master-grid-75{display:grid;grid-template-columns:repeat(10,1fr);gap:3px;max-height:180px;overflow-y:auto;background:#06180d;padding:6px;border-radius:10px;border:1px solid var(--line)}
+.bingo-header-labels{display:grid;grid-template-columns:repeat(5,1fr);text-align:center;font-weight:900;color:var(--gold);background:#06180d;padding:4px 6px 0 6px;border-top-left-radius:10px;border-top-right-radius:10px;font-size:12px}
+.master-grid-75{display:grid;grid-template-columns:repeat(15,1fr);gap:2px;background:#06180d;padding:6px;border-bottom-left-radius:10px;border-bottom-right-radius:10px;border:1px solid var(--line);border-top:0}
 .picker-btn{aspect-ratio:1;background:var(--panel2);border:1px solid var(--line);border-radius:3px;font-size:8px;display:grid;place-items:center;font-weight:700;color:var(--text);cursor:pointer}
 .picker-btn.taken{background:#331010;color:#777;border-color:#551111;cursor:not-allowed}
 .picker-btn.mine{background:var(--teal);color:#041509;font-weight:900}
-.m-cell{aspect-ratio:1;background:var(--panel2);border-radius:4px;font-size:9px;display:grid;place-items:center;font-weight:700;color:var(--muted)}
-.m-cell.called{background:var(--teal);color:#041509;font-weight:900}
+.m-cell{aspect-ratio:1;background:var(--panel2);border-radius:3px;font-size:8px;display:grid;place-items:center;font-weight:700;color:var(--muted)}
+.m-cell.called{background:var(--gold);color:#041509;font-weight:900}
+.called-balls-row{display:flex;gap:4px;overflow-x:auto;margin-top:8px;padding:4px;background:#06180d;border-radius:8px;border:1px solid var(--line)}
+.mini-ball{min-width:24px;height:24px;background:var(--gold);color:#041509;border-radius:50%;display:grid;place-items:center;font-size:10px;font-weight:900}
 .cards-section{display:flex;flex-direction:column;gap:10px;margin-bottom:12px}
 .bingo-card{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:10px}
 .card-title{font-size:12px;font-weight:bold;margin-bottom:6px;color:var(--gold)}
@@ -535,8 +543,24 @@ input,select{width:100%;background:var(--panel2);border:1px solid var(--line);pa
 
 APP_JS = r"""(() => {
 const tg=window.Telegram?.WebApp;if(tg){tg.ready();tg.expand()}
-const initData=tg?.initData||'';let model=null;
+const initData=tg?.initData||'';let model=null;let lastSpokenNum=null;
 function toast(s){const e=document.getElementById('toast');e.textContent=s;e.style.display='block';setTimeout(()=>e.style.display='none',2500)}
+
+function speakNumber(n){
+  if(!n || n===lastSpokenNum) return;
+  lastSpokenNum=n;
+  if('speechSynthesis' in window){
+    let letter='B';
+    if(n>=16 && n<=30)letter='I';
+    else if(n>=31 && n<=45)letter='N';
+    else if(n>=46 && n<=60)letter='G';
+    else if(n>=61 && n<=75)letter='O';
+    let text=letter+' '+n;
+    let utterance=new SpeechSynthesisUtterance(text);
+    utterance.lang='en-US';
+    window.speechSynthesis.speak(utterance);
+  }
+}
 
 async function api(path,method='GET',body=null){const o={method,headers:{'Content-Type':'application/json','X-Telegram-Init-Data':initData}};if(body)o.body=JSON.stringify(body);const r=await fetch(path,o);const d=await r.json().catch(()=>({error:'Error'}));if(!r.ok)throw Error(d.error||'Failed');return d}
 function render(){if(!model)return;
@@ -546,6 +570,8 @@ document.getElementById('win-bal').textContent=(model.win_credits||0).toFixed(2)
 document.getElementById('w-play').textContent=model.credits.toFixed(2);
 document.getElementById('w-win').textContent=(model.win_credits||0).toFixed(2);
 document.getElementById('current').textContent=model.current_number??'—';
+
+if(model.current_number){ speakNumber(model.current_number); }
 
 const isSelecting=(model.phase==='selecting');
 document.getElementById('selection-panel').style.display=isSelecting?'block':'none';
@@ -594,6 +620,13 @@ if(!isSelecting){
     if(el)el.className='m-cell'+(calledSet.has(i)?' called':'');
   }
 }
+
+let ballsRow=document.getElementById('called-balls-row');
+ballsRow.innerHTML='';
+model.called_numbers.slice().reverse().forEach(n=>{
+  let b=document.createElement('div');b.className='mini-ball';b.textContent=n;
+  ballsRow.appendChild(b);
+});
 
 let cc=document.getElementById('cards-container');cc.innerHTML='';
 model.my_cards_data.forEach(item=>{
@@ -695,6 +728,20 @@ def api_miniapp_game():
         for cid in my_cards:
             mat = game_state["card_matrices"].setdefault((uid, cid), generate_75_bingo_card(cid * 999 + uid))
             mset = list(game_state["marked"].setdefault((uid, cid), {"FREE"}))
+            
+            # Auto check line bingo and finish round automatically if achieved
+            if card_has_bingo(mat, mset) and uid not in game_state["winner_ids"]:
+                game_state["winner_ids"].add(uid)
+                prize = game_state["prize"] if game_state["prize"] > 0 else 50.0
+                update_credits(uid, prize, is_win=True)
+                # record win
+                with closing(db()) as con:
+                    con.execute("INSERT INTO wins(user_id, username, round_no, card_index, prize) VALUES(?,?,?,?,?)",
+                                (uid, user.get("username",""), game_state["round"], cid, prize))
+                    con.commit()
+                # reset round after short delay/next check
+                reset_round()
+
             my_cards_data.append({"card_id": cid, "matrix": mat, "marked": mset})
 
         taken_list = list(game_state["taken_card_numbers"])
@@ -783,6 +830,10 @@ def api_miniapp_claim():
     game_state["winner_ids"].add(uid)
     prize = game_state["prize"] if game_state["prize"] > 0 else 50.0
     update_credits(uid, prize, is_win=True)
+    with closing(db()) as con:
+        con.execute("INSERT INTO wins(user_id, username, round_no, card_index, prize) VALUES(?,?,?,?,?)",
+                    (uid, user.get("username",""), game_state["round"], 0, prize))
+        con.commit()
     reset_round()
     return jsonify({"message": f"ብሩህ አሸናፊ! {prize} ETB አሸንፈዋል!"})
 
