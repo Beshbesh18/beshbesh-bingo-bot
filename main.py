@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Flash Bingo â€” Telegram bot + Telegram Mini App
+Flash Bingo — Telegram bot + Telegram Mini App
 1-600 Card Selection (50s timer), 1-75 Master Grid & Cards,
 Play/Win Wallets, Deposit/Withdraw, Line Bingo check, and Voice Number Calling.
 
@@ -258,7 +258,6 @@ def game_loop_worker():
                         game_state["called_numbers"] = []
                         game_state["current_number"] = None
                     else:
-                        # nobody picked a card: restart the timer instead of getting stuck
                         game_state["selection_ends_at"] = time.time() + SELECTION_TIME_SECONDS
         except Exception:
             logger.exception("game_loop_worker error")
@@ -279,7 +278,6 @@ def auto_caller_loop():
                     game_state["called_numbers"].append(num)
                     game_state["current_number"] = num
                 else:
-                    # all 75 numbers called and no winner: refund and restart
                     reset_round(refund=True)
         except Exception:
             logger.exception("auto_caller_loop error")
@@ -288,33 +286,33 @@ def auto_caller_loop():
 # ------------------------------ Localization & Handlers -------------------------
 TEXT = {
     "am": {
-        "welcome": "ðŸŽ° áŠ¥áŠ•áŠ³áŠ• á‹°áˆ…áŠ“ áˆ˜áŒ¡ á‹ˆá‹° Flash Bingo!\n\náŠ áŒ“áŒŠ áŠ¥áŠ“ áˆáŒ£áŠ• á‹¨á‰¢áŠ•áŒŽ áŒ¨á‹‹á‰³ áˆ˜á‹µáˆ¨áŠ­á¢",
-        "play": "ðŸŽ® Flash Bingo áŒ¨á‹‹á‰³",
-        "balance": "ðŸ’° á‰¥áˆ­ áˆ‚áˆ³á‰¥",
-        "rules": "ðŸ“œ áˆ•áŒ áŠ¥áŠ“ á‹°áŠ•á‰¦á‰½",
-        "wallet": "ðŸ’³ Wallet / áŠªáˆµ á‰¦áˆ­áˆ³",
-        "rank": "ðŸ† á‹°áˆ¨áŒƒ",
-        "language": "ðŸŒ á‰‹áŠ•á‰‹ / Language",
-        "support": "ðŸ†˜ á‹µáŒ‹á",
-        "admin": "ðŸ›¡ áŠ á‹µáˆšáŠ•",
-        "choose": "áŠ¨á‰³á‰½ á‹«áˆ‰á‰µáŠ• áŠ áˆ›áˆ«áŒ®á‰½ á‹­áˆáˆ¨áŒ¡á¢",
-        "balance_msg": "ðŸ’° á‹¨áŠªáˆµ áˆ‚áˆ³á‰¥á‹Ž:\nPlay Wallet: {credits} ETB\nWin Wallet: {win_credits} ETB",
-        "rules_msg": "ðŸ“œ áˆ•áŒŽá‰½\nâ€¢ áŠ«áˆ­á‹µ á‹‹áŒ‹: 10 á‰¥áˆ­\nâ€¢ áŠ¨ 1 áŠ¥áˆµáŠ¨ 600 áŠ«áˆ­á‹¶á‰½ á‹áˆµáŒ¥ á‹­áˆáˆ¨áŒ¡\nâ€¢ á‰áŒ¥áˆ®á‰½ áŠ¨ 1 áŠ¥áˆµáŠ¨ 75 á‹­áŒ áˆ«áˆ‰",
-        "language_set": "á‰‹áŠ•á‰‹á‹ á‹ˆá‹° áŠ áˆ›áˆ­áŠ› á‰°áˆµá‰°áŠ«áŠ­áˆáˆá¢",
+        "welcome": "🎰 እንኳን ደህና መጡ ወደ Flash Bingo!\n\nአማራጭ እና ፈጣን የቢንጎ ጨዋታ መድረክ",
+        "play": "🎮 Flash Bingo ጨዋታ",
+        "balance": "💰 ብር ሂሳብ",
+        "rules": "📜 ሕግ እና ደንቦች",
+        "wallet": "💳 Wallet / አካውንት ብር",
+        "rank": "🏆 ደረጃ",
+        "language": "🌐 ቋንቋ / Language",
+        "support": "🆘 እርዳታ",
+        "admin": "🛡 አድሚን",
+        "choose": "ከታች ያሉትን አማራጮች ይምረጡ።",
+        "balance_msg": "💰 የአካውንት ሂሳብዎ:\nPlay Wallet: {credits} ETB\nWin Wallet: {win_credits} ETB",
+        "rules_msg": "📜 ሕጎች\n• ካርድ ውድድር: 10 ብር\n• ከ 1 እስከ 600 ካርዶች ውስጥ ይምረጡ\n• ቁጥሮች ከ 1 እስከ 75 ይጠራሉ",
+        "language_set": "ቋንቋው ወደ አማርኛ ተስተካክሏል።",
     },
     "en": {
-        "welcome": "ðŸŽ° Welcome to Flash Bingo!\n\nFast and exciting bingo gaming platform.",
-        "play": "ðŸŽ® Play Flash Bingo",
-        "balance": "ðŸ’° Balance",
-        "rules": "ðŸ“œ Rules",
-        "wallet": "ðŸ’³ Wallet",
-        "rank": "ðŸ† Rank",
-        "language": "ðŸŒ Language",
-        "support": "ðŸ†˜ Help",
-        "admin": "ðŸ›¡ Admin",
+        "welcome": "🎰 Welcome to Flash Bingo!\n\nFast and exciting bingo gaming platform.",
+        "play": "🎮 Play Flash Bingo",
+        "balance": "💰 Balance",
+        "rules": "📜 Rules",
+        "wallet": "💳 Wallet",
+        "rank": "🏆 Rank",
+        "language": "🌐 Language",
+        "support": "🆘 Help",
+        "admin": "🛡 Admin",
         "choose": "Choose an option below.",
-        "balance_msg": "ðŸ’° Your balance:\nPlay Wallet: {credits} ETB\nWin Wallet: {win_credits} ETB",
-        "rules_msg": "ðŸ“œ Rules\nâ€¢ Card cost: 10 ETB\nâ€¢ Pick cards from 1 to 600\nâ€¢ Numbers called from 1 to 75",
+        "balance_msg": "💰 Your balance:\nPlay Wallet: {credits} ETB\nWin Wallet: {win_credits} ETB",
+        "rules_msg": "📜 Rules\n• Card cost: 10 ETB\n• Pick cards from 1 to 600\n• Numbers called from 1 to 75",
         "language_set": "Language changed to English.",
     },
 }
@@ -343,7 +341,7 @@ def webapp_url():
 def start_keyboard():
     if PUBLIC_URL:
         return InlineKeyboardMarkup([[
-            InlineKeyboardButton("âš¡ Flash Bingo áŠ­áá‰µ", web_app=WebAppInfo(url=webapp_url()))
+            InlineKeyboardButton("⚡ Flash Bingo ክፍት", web_app=WebAppInfo(url=webapp_url()))
         ]])
     return None
 
@@ -357,17 +355,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text(text, reply_markup=markup)
     else:
         await update.effective_message.reply_text(text)
-    await update.effective_message.reply_text("Flash Bingo âš¡", reply_markup=main_keyboard(user.id))
+    await update.effective_message.reply_text("Flash Bingo ⚡", reply_markup=main_keyboard(user.id))
 
 
 async def language_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     ensure_user(user.id, user.username, user.first_name)
     keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("áŠ áˆ›áˆ­áŠ›", callback_data="lang:am"),
+        InlineKeyboardButton("አማርኛ", callback_data="lang:am"),
         InlineKeyboardButton("English", callback_data="lang:en"),
     ]])
-    await update.effective_message.reply_text("á‰‹áŠ•á‰‹ á‹­áˆáˆ¨áŒ¡ / Choose language:", reply_markup=keyboard)
+    await update.effective_message.reply_text("ቋንቋ ይምረጡ / Choose language:", reply_markup=keyboard)
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -377,36 +375,36 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = get_language(user.id)
     t = TEXT.get(lang, TEXT["am"])
 
-    if msg in (t["play"], "ðŸŽ® Flash Bingo áŒ¨á‹‹á‰³", "ðŸŽ® Play Flash Bingo"):
+    if msg in (t["play"], "🎮 Flash Bingo ጨዋታ", "🎮 Play Flash Bingo"):
         markup = start_keyboard()
         if markup:
-            await update.effective_message.reply_text("Flash Bingo âš¡", reply_markup=markup)
+            await update.effective_message.reply_text("Flash Bingo ⚡", reply_markup=markup)
         else:
             await update.effective_message.reply_text("Set RENDER_EXTERNAL_URL to enable the Mini App.")
-    elif msg in (t["balance"], "ðŸ’° á‰¥áˆ­ áˆ‚áˆ³á‰¥", "ðŸ’° Balance"):
+    elif msg in (t["balance"], "💰 ብር ሂሳብ", "💰 Balance"):
         row = get_user(user.id)
         await update.effective_message.reply_text(
             tr(user.id, "balance_msg", credits=row["credits"], win_credits=row["win_credits"]))
-    elif msg in (t["rules"], "ðŸ“œ áˆ•áŒ áŠ¥áŠ“ á‹°áŠ•á‰¦á‰½", "ðŸ“œ Rules"):
+    elif msg in (t["rules"], "📜 ሕግ እና ደንቦች", "📜 Rules"):
         await update.effective_message.reply_text(tr(user.id, "rules_msg"))
-    elif msg in (t["wallet"], "ðŸ’³ Wallet / áŠªáˆµ á‰¦áˆ­áˆ³", "ðŸ’³ Wallet"):
+    elif msg in (t["wallet"], "💳 Wallet / አካውንት ብር", "💳 Wallet"):
         await update.effective_message.reply_text(
-            "ðŸ’³ Wallet\nTelebirr: 0918719332 Â· Enyew\nCBE Birr: 0918719332 Â· Enyew\n\n"
-            "áŠ­áá‹« áŠ¨áˆáŒ¸áˆ™ á‰ áŠ‹áˆ‹ á‰  Mini App á‹áˆµáŒ¥ á‹¨áŠ­áá‹« áˆ›áˆ¨áŒ‹áŒˆáŒ« á‰áŒ¥áˆ­á‹ŽáŠ• á‹­áˆ‹áŠ©á¢")
-    elif msg in (t["rank"], "ðŸ† á‹°áˆ¨áŒƒ", "ðŸ† Rank"):
+            "💳 Wallet\nTelebirr: 0918719332 · Enyew\nCBE Birr: 0918719332 · Enyew\n\n"
+            "ክፍያ ከፈጸሙ በኋላ በ Mini App ውስጥ የክፍያ ማረጋገጫ ቁጥርዎን ያስገቡ።")
+    elif msg in (t["rank"], "🏆 ደረጃ", "🏆 Rank"):
         with closing(db()) as con:
             rows = con.execute(
                 "SELECT username, first_name, win_credits FROM users ORDER BY win_credits DESC LIMIT 10"
             ).fetchall()
-        lines = ["ðŸ† Top Flash Players"]
+        lines = ["🏆 Top Flash Players"]
         for i, r in enumerate(rows, 1):
             name = ("@" + r["username"]) if r["username"] else (r["first_name"] or "Player")
-            lines.append(f"{i}. {name} â€” {r['win_credits']} ETB")
+            lines.append(f"{i}. {name} — {r['win_credits']} ETB")
         await update.effective_message.reply_text("\n".join(lines))
-    elif msg in (t["language"], "ðŸŒ á‰‹áŠ•á‰‹ / Language", "ðŸŒ Language"):
+    elif msg in (t["language"], "🌐 ቋንቋ / Language", "🌐 Language"):
         await language_command(update, context)
-    elif msg in (t["support"], "ðŸ†˜ á‹µáŒ‹á", "ðŸ†˜ Help"):
-        await update.effective_message.reply_text("ðŸ†˜ á‹µáŒ‹á / Help\nContact the administrator for support.")
+    elif msg in (t["support"], "🆘 እርዳታ", "🆘 Help"):
+        await update.effective_message.reply_text("🆘 እርዳታ / Help\nContact the administrator for support.")
     else:
         await update.effective_message.reply_text(tr(user.id, "choose"), reply_markup=main_keyboard(user.id))
 
@@ -414,13 +412,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user.id not in ADMIN_IDS:
-        await update.effective_message.reply_text("ðŸš« Unauthorized.")
+        await update.effective_message.reply_text("⛔ Unauthorized.")
         return
     if PUBLIC_URL:
         keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("ðŸ›¡ Open Flash Admin Panel", web_app=WebAppInfo(url=PUBLIC_URL + "/admin"))
+            InlineKeyboardButton("🛡 Open Flash Admin Panel", web_app=WebAppInfo(url=PUBLIC_URL + "/admin"))
         ]])
-        await update.effective_message.reply_text("ðŸ›¡ Admin panel", reply_markup=keyboard)
+        await update.effective_message.reply_text("🛡 Admin panel", reply_markup=keyboard)
     else:
         await update.effective_message.reply_text("Admin panel unavailable until RENDER_EXTERNAL_URL is configured.")
 
@@ -504,28 +502,28 @@ INDEX_HTML = r"""<!doctype html>
 <html lang="am"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="theme-color" content="#06180d"><title>Flash Bingo</title><script src="https://telegram.org/js/telegram-web-app.js"></script><link rel="stylesheet" href="/static/style.css"></head>
 <body><main class="app-shell">
 <header class="topbar">
-  <div class="brand-info"><div class="eyebrow">âš¡ FLASH BINGO</div><h1 id="round-title">á‹™áˆ­ #1</h1></div>
+  <div class="brand-info"><div class="eyebrow">⚡ FLASH BINGO</div><h1 id="round-title">ዙር #1</h1></div>
   <div class="top-scores">
     <div class="score-box"><span>PLAY</span><strong id="play-bal">0.00</strong></div>
     <div class="score-box win"><span>WIN</span><strong id="win-bal">0.00</strong></div>
-    <div class="current-call-badge" id="current">â€”</div>
+    <div class="current-call-badge" id="current">—</div>
   </div>
 </header>
 
-<div id="phase-banner" class="phase-banner">áˆ°á‹“á‰µ áŠ¥á‹«áˆˆá‰€ áŠá‹: <span id="timer">50</span> áˆ°áŠ¨áŠ•á‹µ (áŠ«áˆ­á‹µ á‹­áˆáˆ¨áŒ¡ 1-600)</div>
+<div id="phase-banner" class="phase-banner">ሰዓቱ እየተጠናቀቀ ነው: <span id="timer">50</span> ሰከንድ (ካርድ ይምረጡ 1-600)</div>
 
 <section class="game-panel" id="selection-panel">
   <div class="section-header">
-    <h2>áŠ«áˆ­á‹µ á‰áŒ¥áˆ­ á‹­áˆáˆ¨áŒ¡ (áŠ¨ 1 áŠ¥áˆµáŠ¨ 600)</h2>
-    <span class="card-count-pill" id="my-chosen-count">á‹¨á‰°áˆ˜áˆ¨áŒ¡: 0/4</span>
+    <h2>ካርድ ቁጥር ይምረጡ (ከ 1 እስከ 600)</h2>
+    <span class="card-count-pill" id="my-chosen-count">የተመረጠ: 0/4</span>
   </div>
   <div class="master-grid" id="number-picker-grid"></div>
 </section>
 
 <section class="game-panel" id="live-game-panel" style="display:none;">
   <div class="section-header">
-    <h2>á‹¨á‰°áŒ áˆ© á‰áŒ¥áˆ®á‰½ (1 - 75)</h2>
-    <span class="card-count-pill" id="card-count">áŠ«áˆ­á‹¶á‰½: 0</span>
+    <h2>የተጠሩ ቁጥሮች (1 - 75)</h2>
+    <span class="card-count-pill" id="card-count">ካርዶች: 0</span>
   </div>
   <div class="master-grid-75" id="master-grid-75"></div>
   <div class="called-balls-row" id="called-balls-row"></div>
@@ -534,54 +532,54 @@ INDEX_HTML = r"""<!doctype html>
 <section class="cards-section" id="cards-container"></section>
 
 <div class="actions-row" id="game-actions" style="display:none;">
-  <button id="claim" class="success-btn">ðŸ† BINGO! áŠ áŒáŠ</button>
+  <button id="claim" class="success-btn">🏆 BINGO! አገኙ</button>
 </div>
 
 <div class="wallet-section" id="wallet-section" style="display:none;">
-  <h2>ðŸ’³ áŠªáˆµ á‰¦áˆ­áˆ³ áŠ¥áŠ“ áŠ­áá‹«</h2>
+  <h2>💳 ኪስ ቦርሳ እና ክፍያ</h2>
   <div class="balance-display-box">
     <div>PLAY WALLET: <strong id="w-play">0.00</strong> ETB</div>
     <div>WIN WALLET: <strong id="w-win">0.00</strong> ETB</div>
   </div>
   <div class="wallet-buttons-row">
-    <button id="show-deposit" class="primary-btn">ðŸ“¥ DEPOSIT</button>
-    <button id="show-withdraw" class="success-btn">ðŸ“¤ WITHDRAW</button>
+    <button id="show-deposit" class="primary-btn">📥 DEPOSIT</button>
+    <button id="show-withdraw" class="success-btn">📤 WITHDRAW</button>
   </div>
   <div id="deposit-form" class="sub-form">
-    <h3>áŒˆáŠ•á‹˜á‰¥ áˆ›áˆµáŒˆá‰£á‰µ</h3>
+    <h3>ገንዘብ ማስገባት</h3>
     <select id="deposit-method"><option>Telebirr</option><option>CBE Birr</option></select>
-    <input id="deposit-amount" type="number" placeholder="á‹¨áŠ­áá‹« áˆ˜áŒ áŠ• (á‰¥áˆ­)">
+    <input id="deposit-amount" type="number" placeholder="የክፍያ መጠን (ብር)">
     <input id="deposit-reference" placeholder="Transaction ID">
-    <button id="send-deposit" class="primary-btn">á‹¨áŠ­áá‹« áŒ¥á‹«á‰„ áˆ‹áŠ­</button>
+    <button id="send-deposit" class="primary-btn">የክፍያ ጥያቄ ላክ</button>
   </div>
   <div id="withdraw-form" class="sub-form" style="display:none;">
-    <h3>áŒˆáŠ•á‹˜á‰¥ áˆ›á‹áŒ£á‰µ</h3>
-    <input id="withdraw-account" placeholder="áŠ áŠ«á‹áŠ•á‰µ á‰áŒ¥áˆ­ / áˆµáˆáŠ­ áŠ¥áŠ“ áˆµáˆ">
-    <input id="withdraw-amount" type="number" placeholder="áˆ˜áŒ áŠ• (á‰¥áˆ­)">
-    <button id="send-withdraw" class="success-btn">áˆ›á‹áŒ£á‰µ áŒ¥á‹«á‰„ áˆ‹áŠ­</button>
+    <h3>ገንዘብ ማውጣት</h3>
+    <input id="withdraw-account" placeholder="አካውንት ቁጥር / ስልክ እና ስም">
+    <input id="withdraw-amount" type="number" placeholder="መጠን (ብር)">
+    <button id="send-withdraw" class="success-btn">ማውጣት ጥያቄ ላክ</button>
   </div>
 </div>
 
 <div class="rank-section" id="rank-section" style="display:none;">
-  <h2>ðŸ† áŠ¨áá‰°áŠ› á‰°áŒ«á‹‹á‰¾á‰½</h2>
-  <div id="rank-list">áŒ­áŠá‰µ áˆ‹á‹­...</div>
+  <h2>🏆 ከፍተኛ ተወዳዳሪዎች</h2>
+  <div id="rank-list">እየጫነ ነው።...</div>
 </div>
 
 <nav class="bottom-nav">
-  <button class="nav-btn active" data-tab="bingo" onclick="switchTab('bingo')">ðŸŽ¯ BINGO</button>
-  <button class="nav-btn" data-tab="wallet" onclick="switchTab('wallet')">ðŸ’³ WALLET</button>
-  <button class="nav-btn" data-tab="rank" onclick="switchTab('rank')">ðŸ† RANK</button>
+  <button class="nav-btn active" data-tab="bingo" onclick="switchTab('bingo')">🎯 BINGO</button>
+  <button class="nav-btn" data-tab="wallet" onclick="switchTab('wallet')">💳 WALLET</button>
+  <button class="nav-btn" data-tab="rank" onclick="switchTab('rank')">🏆 RANK</button>
 </nav>
 </main><div id="toast"></div><script src="/static/app.js"></script></body></html>"""
 
 ADMIN_HTML = r"""<!doctype html><html lang="am"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Flash Bingo Admin</title><script src="https://telegram.org/js/telegram-web-app.js"></script><link rel="stylesheet" href="/static/style.css"><style>.admin{max-width:700px;margin:auto;padding:16px}.req{background:#0b2113;border:1px solid #20552d;padding:12px;border-radius:10px;margin-bottom:10px}.req span{display:block;font-size:11px;color:#a3b8a8}</style></head>
-<body class="admin"><header><h1>ðŸ›¡ Flash Bingo áŠ á‹µáˆšáŠ• á“áŠáˆ</h1><button id="refresh" class="primary-btn">âŸ³ áŠ á‹²áˆµ</button></header>
+<body class="admin"><header><h1>🛡 Flash Bingo አድሚን ፓነል</h1><button id="refresh" class="primary-btn">🔄 አዲስ</button></header>
 <section style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:15px 0">
-  <div class="req"><span>á‰°áŒ«á‹‹á‰¾á‰½</span><strong id="u-count">â€”</strong></div>
-  <div class="req"><span>áŒ á‰…áˆ‹áˆ‹ á‰¥áˆ­</span><strong id="t-cred">â€”</strong></div>
-  <div class="req"><span>á‰ áˆ˜áŒ á‰£á‰ á‰… áˆ‹á‹­</span><strong id="p-count">â€”</strong></div>
+  <div class="req"><span>ተወዳዳሪዎች</span><strong id="u-count">—</strong></div>
+  <div class="req"><span>ጠቅላላ ብር</span><strong id="t-cred">—</strong></div>
+  <div class="req"><span>በመጠባበቅ ላይ</span><strong id="p-count">—</strong></div>
 </section>
-<h2>á‹¨áŠ­áá‹« áŒ¥á‹«á‰„á‹Žá‰½</h2><div id="req-list">áŒ­áŠá‰µ áˆ‹á‹­...</div><script src="/static/admin.js"></script></body></html>"""
+<h2>የክፍያ ጥያቄዎች</h2><div id="req-list">እየጫነ ነው።...</div><script src="/static/admin.js"></script></body></html>"""
 
 STYLE_CSS = r""":root{color-scheme:dark;--bg:#041509;--panel:#0b2113;--panel2:#102d19;--line:#20552d;--text:#f4f7f4;--muted:#a3b8a8;--gold:#ffe629;--teal:#39d66f}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);font-family:system-ui,sans-serif;color:var(--text);padding-bottom:70px}
@@ -665,12 +663,12 @@ function render() {
   const isBingo = tab === 'bingo';
   const isSelecting = (model.phase === 'selecting');
 
-  document.getElementById('round-title').textContent = 'á‹™áˆ­ #' + model.round;
+  document.getElementById('round-title').textContent = 'ዙር #' + model.round;
   document.getElementById('play-bal').textContent = model.credits.toFixed(2);
   document.getElementById('win-bal').textContent = (model.win_credits || 0).toFixed(2);
   document.getElementById('w-play').textContent = model.credits.toFixed(2);
   document.getElementById('w-win').textContent = (model.win_credits || 0).toFixed(2);
-  document.getElementById('current').textContent = model.current_number ?? 'â€”';
+  document.getElementById('current').textContent = model.current_number ?? '—';
 
   if (model.current_number) speakNumber(model.current_number);
   else lastSpokenNum = null;
@@ -685,10 +683,9 @@ function render() {
 
   const rem = Math.max(0, Math.floor(model.selection_ends_at - (Date.now() / 1000 + clockOffset)));
   document.getElementById('timer').textContent = rem;
-  document.getElementById('my-chosen-count').textContent = 'á‹¨á‰°áˆ˜áˆ¨áŒ¡: ' + model.my_cards.length + '/4';
-  document.getElementById('card-count').textContent = 'áŠ«áˆ­á‹¶á‰½: ' + model.my_cards.length;
+  document.getElementById('my-chosen-count').textContent = 'የተመረጠ: ' + model.my_cards.length + '/4';
+  document.getElementById('card-count').textContent = 'ካርዶች: ' + model.my_cards.length;
 
-  // 1..600 card picker
   const picker = document.getElementById('number-picker-grid');
   if (picker.children.length === 0) {
     for (let i = 1; i <= 600; i++) {
@@ -709,7 +706,6 @@ function render() {
     });
   }
 
-  // 1..75 master grid (rows B-I-N-G-O, 15 numbers each)
   const calledSet = new Set(model.called_numbers);
   const mg75 = document.getElementById('master-grid-75');
   if (mg75.children.length === 0) {
@@ -736,19 +732,18 @@ function render() {
     ballsRow.appendChild(b);
   });
 
-  // my cards
   const cc = document.getElementById('cards-container'); cc.innerHTML = '';
   model.my_cards_data.forEach(item => {
     const cid = item.card_id;
     const marked = new Set(item.marked || ['FREE']);
     const box = document.createElement('div'); box.className = 'bingo-card';
     const title = document.createElement('div'); title.className = 'card-title';
-    title.textContent = 'áŠ«áˆ­á‹µ #' + cid + ' (1-75)';
+    title.textContent = 'ካርድ #' + cid + ' (1-75)';
     box.appendChild(title);
     const grid = document.createElement('div'); grid.className = 'card-grid';
     item.matrix.forEach(row => row.forEach(n => {
       const btn = document.createElement('button'); btn.className = 'c-cell';
-      if (n === 'FREE') { btn.classList.add('free'); btn.textContent = 'â˜…'; }
+      if (n === 'FREE') { btn.classList.add('free'); btn.textContent = '★'; }
       else {
         btn.textContent = n;
         if (calledSet.has(n)) btn.classList.add('called');
@@ -772,7 +767,7 @@ async function refresh() {
 async function action(path, body = {}) {
   try {
     const d = await api(path, 'POST', body);
-    toast(d.message || 'á‰°áˆ³áŠ«');
+    toast(d.message || 'ተሳካ');
     await refresh();
     return d;
   } catch (e) { toast(e.message); }
@@ -792,7 +787,7 @@ async function loadRank() {
     d.rows.forEach((r, i) => {
       const div = document.createElement('div');
       div.style.cssText = 'padding:6px;border-bottom:1px solid #20552d';
-      div.append((i + 1) + '. ' + r.name + ' â€” ');
+      div.append((i + 1) + '. ' + r.name + ' — ');
       const b = document.createElement('b'); b.textContent = r.credits + ' ETB';
       div.appendChild(b); list.appendChild(div);
     });
@@ -812,14 +807,14 @@ document.getElementById('send-deposit').onclick = () => {
   const amount = Number(document.getElementById('deposit-amount').value);
   const method = document.getElementById('deposit-method').value;
   const reference = document.getElementById('deposit-reference').value.trim();
-  if (!amount || reference.length < 3) { toast('áˆ˜áˆ¨áŒƒ á‹­áˆ™áˆ‰'); return; }
+  if (!amount || reference.length < 3) { toast('መረጃ ይሙሉ'); return; }
   action('/api/miniapp/deposit-request', { amount, method, reference })
     .then(() => { document.getElementById('deposit-reference').value = ''; });
 };
 document.getElementById('send-withdraw').onclick = () => {
   const amount = Number(document.getElementById('withdraw-amount').value);
   const account_info = document.getElementById('withdraw-account').value.trim();
-  if (!amount || account_info.length < 3) { toast('áˆ˜áˆ¨áŒƒ á‹­áˆ™áˆ‰'); return; }
+  if (!amount || account_info.length < 3) { toast('መረጃ ይሙሉ'); return; }
   action('/api/miniapp/withdraw-request', { amount, account_info }).then(() => {
     document.getElementById('withdraw-amount').value = '';
     document.getElementById('withdraw-account').value = '';
@@ -841,10 +836,11 @@ async function load() {
   document.getElementById('p-count').textContent = d.pending_count;
   document.getElementById('req-list').innerHTML = d.requests.map(q => {
     const buttons = q.status === 'pending'
-      ? `<button onclick="review(${Number(q.id)},'approve')" style="background:#39d66f;border:0;padding:6px 12px;border-radius:6px;font-weight:bold">áŠ áŒ½á‹µá‰…</button>
-         <button onclick="review(${Number(q.id)},'reject')" style="background:#d63939;border:0;padding:6px 12px;border-radius:6px;font-weight:bold;color:#fff">á‹á‹µá‰…</button>`
+      ? `<button onclick="review(${Number(q.id)},'approve')" style="background:#39d66f;border:0;padding:6px 12px;border-radius:6px;font-weight:bold">አጽድቅ</button>
+         <button onclick="review(${Number(q.id)},'reject')" style="background:#d63939;border:0;padding:6px 12px;border-radius:6px;font-weight:bold;color:#fff">እቢ</button>`
       : `<i>${esc(q.status)}</i>`;
-    return `<div class="req"><b>#${Number(q.id)} Â· ${esc(q.amount)} á‰¥áˆ­ (${esc(q.method)})</b>
+
+    return `<div class="req"><b>#${Number(q.id)} · ${esc(q.amount)} ብር (${esc(q.method)})</b>
       <p>User: ${esc(q.user_id)} | Ref: ${esc(q.reference)}</p>${buttons}</div>`;
   }).join('');
 }
@@ -926,13 +922,13 @@ def api_miniapp_select_card():
     try:
         card_num = int(body.get("card_number"))
     except (TypeError, ValueError):
-        return json_error("áˆáŠ­ á‹«áˆáˆ†áŠ áŠ«áˆ­á‹µ á‰áŒ¥áˆ­")
+        return json_error("ሕጋዊ ያልሆነ ካርድ ቁጥር")
     if card_num < 1 or card_num > TOTAL_CARDS:
-        return json_error("áˆáŠ­ á‹«áˆáˆ†áŠ áŠ«áˆ­á‹µ á‰áŒ¥áˆ­")
+        return json_error("ሕጋዊ ያልሆነ ካርድ ቁጥር")
 
     with game_lock:
         if game_state["phase"] != "selecting":
-            return json_error("á‹¨áŠ«áˆ­á‹µ áˆáˆ­áŒ« áŒŠá‹œ áŠ áˆá‰‹áˆ")
+            return json_error("የካርድ ምርጫ ጊዜ አላለፈም")
 
         my_cards = game_state["player_cards"].setdefault(uid, [])
 
@@ -944,15 +940,15 @@ def api_miniapp_select_card():
             game_state["marked"].pop((uid, card_num), None)
             game_state["prize"] -= CARD_COST
             update_credits(uid, CARD_COST, is_win=False)
-            return jsonify({"message": "áŠ«áˆ­á‹± á‰°áˆ°áˆ­á‹Ÿáˆ"})
+            return jsonify({"message": "ካርዱ ተሰርዟል"})
 
         row = get_user(uid)
         if (row["credits"] if row else 0.0) < CARD_COST:
-            return json_error("á‰ á‰‚ áˆ‚áˆ³á‰¥ á‹¨áˆˆá‹Žá‰µáˆ (10 á‰¥áˆ­ á‹«áˆµáˆáˆáŒ‹áˆ)")
+            return json_error("በቂ ድርሻ የለዎትም (10 ብር ያስፈልጋል)")
         if len(my_cards) >= MAX_CARDS_PER_PLAYER:
-            return json_error("áŠ¨ 4 á‰ áˆ‹á‹­ áŠ«áˆ­á‹µ áˆ˜á‹«á‹ áŠ á‹­á‰»áˆáˆ")
+            return json_error("ከ 4 በላይ ካርድ መምረጥ አይችሉም")
         if card_num in game_state["taken_card_numbers"]:
-            return json_error("á‹­áˆ… áŠ«áˆ­á‹µ á‰ áˆŒáˆ‹ á‰°áŒ«á‹‹á‰½ á‰°á‹­á‹Ÿáˆ")
+            return json_error("ይህ ካርድ በሌላ ተወዳዳሪ ተይዟል")
 
         game_state["taken_card_numbers"].add(card_num)
         my_cards.append(card_num)
@@ -961,7 +957,7 @@ def api_miniapp_select_card():
         game_state["card_matrices"][(uid, card_num)] = generate_75_bingo_card(card_num * 999 + uid)
         game_state["marked"][(uid, card_num)] = {"FREE"}
 
-    return jsonify({"message": f"áŠ«áˆ­á‹µ #{card_num} á‰°á‹­á‹Ÿáˆ!"})
+    return jsonify({"message": f"ካርድ #{card_num} ተይዟል!"})
 
 
 @app.post("/api/miniapp/mark")
@@ -974,21 +970,21 @@ def api_miniapp_mark():
     cid, num = body.get("card_id"), body.get("number")
     with game_lock:
         if game_state["phase"] != "playing":
-            return json_error("áŒ¨á‹‹á‰³á‹ áŒˆáŠ“ áŠ áˆáŒ€áˆ˜áˆ¨áˆ")
+            return json_error("ጨዋታው ገና አልጀመረም")
         if cid not in game_state["player_cards"].get(uid, []):
-            return json_error("á‹­áˆ… áŠ«áˆ­á‹µ á‹¨áŠ¥áˆ­áˆµá‹Ž áŠ á‹­á‹°áˆˆáˆ")
+            return json_error("ይህ ካርድ የእርስዎ አይደለም")
         if num != "FREE" and num not in game_state["called_numbers"]:
-            return json_error("á‰áŒ¥áˆ© áŒˆáŠ“ áŠ áˆá‰°áŒ áˆ«áˆ")
+            return json_error("ቁጥሩ ገና አልተጠራም")
         mat = game_state["card_matrices"].get((uid, cid))
         if num != "FREE" and (not mat or not any(num in row for row in mat)):
-            return json_error("á‰áŒ¥áˆ© á‰ áŠ«áˆ­á‹± áˆ‹á‹­ á‹¨áˆˆáˆ")
+            return json_error("ቁጥሩ በካርዱ ላይ የለም")
         game_state["marked"].setdefault((uid, cid), {"FREE"}).add(num)
 
         # auto-win as soon as a line is completed
         result = try_award(uid, user.get("username", ""))
     if result:
-        return jsonify({"message": f"ðŸ† á‰¥áˆ©áˆ… áŠ áˆ¸áŠ“áŠ! {result[0]} ETB áŠ áˆ¸áŠ•áˆá‹‹áˆ!"})
-    return jsonify({"message": "áˆáˆáŠ­á‰µ á‰°á‹°áˆ­áŒ“áˆ"})
+        return jsonify({"message": f"🏆 በረዶው አሸነፈ! {result[0]} ETB አሸንፈዋል!"})
+    return jsonify({"message": "ምልክት ተደርጓል"})
 
 
 @app.post("/api/miniapp/claim")
@@ -998,8 +994,8 @@ def api_miniapp_claim():
         return json_error("Unauthorized", 401)
     result = try_award(user["id"], user.get("username", ""))
     if not result:
-        return json_error("BINGO áŠ áˆá‹°áˆ¨áˆ°áˆ!")
-    return jsonify({"message": f"ðŸ† á‰¥áˆ©áˆ… áŠ áˆ¸áŠ“áŠ! {result[0]} ETB áŠ áˆ¸áŠ•áˆá‹‹áˆ!"})
+        return json_error("BINGO አላደረጉም!")
+    return jsonify({"message": f"🏆 በረዶው አሸነፈ! {result[0]} ETB አሸንፈዋል!"})
 
 
 @app.post("/api/miniapp/deposit-request")
@@ -1012,12 +1008,12 @@ def api_miniapp_deposit():
     method = str(body.get("method") or "")[:30]
     ref = str(body.get("reference") or "").strip()[:100]
     if not amt or not ref or method not in ("Telebirr", "CBE Birr"):
-        return json_error("áˆ˜áˆ¨áŒƒ á‹­áˆ™áˆ‰")
+        return json_error("መረጃ ይሙሉ")
     with closing(db()) as con:
         con.execute("INSERT INTO deposit_requests(user_id, method, amount, reference) VALUES(?,?,?,?)",
                     (user["id"], method, amt, ref))
         con.commit()
-    return jsonify({"message": "á‹¨áŠ­áá‹« áŒ¥á‹«á‰„ á‰°áˆáŠ³áˆ"})
+    return jsonify({"message": "የክፍያ ጥያቄ ተልዟል"})
 
 
 @app.post("/api/miniapp/withdraw-request")
@@ -1029,17 +1025,17 @@ def api_miniapp_withdraw():
     amt = to_positive_float(body.get("amount"))
     account_info = str(body.get("account_info") or "").strip()[:200]
     if not amt or not account_info:
-        return json_error("áˆ˜áˆ¨áŒƒ á‹­áˆ™áˆ‰")
+        return json_error("መረጃ ይሙሉ")
     with game_lock:  # serialize balance check + deduction
         row = get_user(user["id"])
         if (row["win_credits"] if row else 0.0) < amt:
-            return json_error("á‰ á‰‚ á‹¨á‹µáˆ áˆ‚áˆ³á‰¥ (Win Wallet) á‹¨áˆˆá‹Žá‰µáˆ")
+            return json_error("በቂ የሽልማት ድርሻ (Win Wallet) የለዎትም")
         update_credits(user["id"], -amt, is_win=True)
         with closing(db()) as con:
             con.execute("INSERT INTO withdraw_requests(user_id, account_info, amount) VALUES(?,?,?)",
                         (user["id"], account_info, amt))
             con.commit()
-    return jsonify({"message": "á‹¨áˆ›á‹áŒ£á‰µ áŒ¥á‹«á‰„ á‰°áˆáŠ³áˆ"})
+    return jsonify({"message": "የማውጣት ጥያቄ ተልዟል"})
 
 
 @app.get("/api/miniapp/rank")
@@ -1086,7 +1082,7 @@ def admin_review(req_id):
         if decision == "approve":
             con.execute("UPDATE users SET credits=credits+? WHERE user_id=?", (row["amount"], row["user_id"]))
         con.commit()
-    return jsonify({"ok": True, "message": "á‰°áˆ¨áŒ‹áŒáŒ§áˆ"})
+    return jsonify({"ok": True, "message": "ተረጋግጧል"})
 
 
 @app.post("/telegram-webhook" if not WEBHOOK_SECRET_PATH else "/telegram-webhook/" + WEBHOOK_SECRET_PATH)
