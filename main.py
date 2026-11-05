@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-Flash Bingo — Telegram bot + Telegram Mini App
-Complete & Unbroken Version with 1-600 Card Selection, 50s Timer, Wallets, Admin,
-1-75 Master Grid, Voice Calling, and Specific Card Win Announcement (#85, #20, etc.).
+Besh Besh Bingo — Telegram bot + Telegram Mini App
+Complete & Unbroken Version with 1-600 Card Selection, 50s Timer, Wallets (with Copy),
+Admin, 1-75 Master Grid, Auto-Bingo detection, and Besh Besh Branding.
 """
 import os
 import json
@@ -51,7 +51,7 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
-logger = logging.getLogger("flash-bingo")
+logger = logging.getLogger("besh-besh-bingo")
 
 if not TOKEN:
     raise RuntimeError("Set the TOKEN environment variable to your Telegram bot token.")
@@ -234,8 +234,8 @@ def reset_round():
 # ------------------------------ Localization & Handlers -------------------------
 TEXT = {
     "am": {
-        "welcome": "🎰 እንኳን ደህና መጡ ወደ Flash Bingo!\n\nአጓጊ እና ፈጣን የቢንጎ ጨዋታ መድረክ።",
-        "play": "🎮 Flash Bingo ጨዋታ",
+        "welcome": "🎰 እንኳን ደህና መጡ ወደ በሽ በሽ ቢንጎ!\n\nአጓጊ እና ፈጣን የቢንጎ ጨዋታ መድረክ።",
+        "play": "🎮 በሽ በሽ ቢንጎ ጨዋታ",
         "balance": "💰 ብር ሂሳብ",
         "rules": "📜 ሕግ እና ደንቦች",
         "wallet": "💳 Wallet / ኪስ ቦርሳ",
@@ -249,8 +249,8 @@ TEXT = {
         "language_set": "ቋንቋው ወደ አማርኛ ተስተካክሏል።",
     },
     "en": {
-        "welcome": "🎰 Welcome to Flash Bingo!\n\nFast and exciting bingo gaming platform.",
-        "play": "🎮 Play Flash Bingo",
+        "welcome": "🎰 Welcome to Besh Besh Bingo!\n\nFast and exciting bingo gaming platform.",
+        "play": "🎮 Play Besh Besh Bingo",
         "balance": "💰 Balance",
         "rules": "📜 Rules",
         "wallet": "💳 Wallet",
@@ -285,7 +285,7 @@ def webapp_url():
 def start_keyboard():
     if PUBLIC_URL:
         return InlineKeyboardMarkup([[
-            InlineKeyboardButton("⚡ Flash Bingo ክፍት", web_app=WebAppInfo(url=webapp_url()))
+            InlineKeyboardButton("🎰 በሽ በሽ ቢንጎ ክፍት", web_app=WebAppInfo(url=webapp_url()))
         ]])
     return None
 
@@ -296,7 +296,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     markup = start_keyboard()
     if markup:
         await update.effective_message.reply_text(text, reply_markup=markup)
-    await update.effective_message.reply_text("Flash Bingo ⚡", reply_markup=main_keyboard(user.id))
+    await update.effective_message.reply_text("Besh Besh Bingo 🎰", reply_markup=main_keyboard(user.id))
 
 async def language_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -313,10 +313,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (update.effective_message.text or "").strip()
     lang = get_language(user.id)
     t = TEXT.get(lang, TEXT["am"])
-    if msg in (t["play"], "🎮 Flash Bingo ጨዋታ", "🎮 በሽ በሽ ቢንጎ ጨዋታ"):
+    if msg in (t["play"], "🎮 በሽ በሽ ቢንጎ ጨዋታ", "🎮 Play Besh Besh Bingo"):
         markup = start_keyboard()
         if markup:
-            await update.effective_message.reply_text("Flash Bingo ⚡", reply_markup=markup)
+            await update.effective_message.reply_text("Besh Besh Bingo 🎰", reply_markup=markup)
         else:
             await update.effective_message.reply_text("Set RENDER_EXTERNAL_URL to enable the Mini App.")
     elif msg in (t["balance"], "💰 ብር ሂሳብ", "💰 Balance"):
@@ -331,7 +331,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif msg in (t["rank"], "🏆 ደረጃ", "🏆 Rank"):
         with closing(db()) as con:
             rows = con.execute("SELECT username, first_name, win_credits FROM users ORDER BY win_credits DESC LIMIT 10").fetchall()
-        lines = ["🏆 Top Flash Players"]
+        lines = ["🏆 Top Besh Besh Players"]
         for i, r in enumerate(rows, 1):
             name = ("@" + r["username"]) if r["username"] else (r["first_name"] or "Player")
             lines.append(f"{i}. {name} — {r['win_credits']} ETB")
@@ -350,7 +350,7 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if PUBLIC_URL:
         keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("🛡 Open Flash Admin Panel", web_app=WebAppInfo(url=PUBLIC_URL + "/admin"))
+            InlineKeyboardButton("🛡 Open Besh Besh Admin Panel", web_app=WebAppInfo(url=PUBLIC_URL + "/admin"))
         ]])
         await update.effective_message.reply_text("🛡 Admin panel", reply_markup=keyboard)
     else:
@@ -415,10 +415,10 @@ def json_error(message, status=400):
 
 # ------------------------------ HTML & JS Assets ---------------------------
 INDEX_HTML = r"""<!doctype html>
-<html lang="am"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="theme-color" content="#06180d"><title>Flash Bingo</title><script src="https://telegram.org/js/telegram-web-app.js"></script><link rel="stylesheet" href="/static/style.css"></head>
+<html lang="am"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="theme-color" content="#06180d"><title>Besh Besh Bingo</title><script src="https://telegram.org/js/telegram-web-app.js"></script><link rel="stylesheet" href="/static/style.css"></head>
 <body><main class="app-shell">
 <header class="topbar">
-  <div class="brand-info"><div class="eyebrow">⚡ FLASH BINGO</div><h1 id="round-title">ዙር #1</h1></div>
+  <div class="brand-info"><div class="eyebrow">🎰 በሽ በሽ ቢንጎ</div><h1 id="round-title">ዙር #1</h1></div>
   <div class="top-scores">
     <div class="score-box"><span>PLAY</span><strong id="play-bal">0.00</strong></div>
     <div class="score-box win"><span>WIN</span><strong id="win-bal">0.00</strong></div>
@@ -458,6 +458,12 @@ INDEX_HTML = r"""<!doctype html>
     <div>PLAY WALLET: <strong id="w-play">0.00</strong> ETB</div>
     <div>WIN WALLET: <strong id="w-win">0.00</strong> ETB</div>
   </div>
+  
+  <div class="payment-info-box">
+    <p><b>Telebirr / CBE Birr:</b> <span id="pay-phone">0918719332</span> (Enyew)</p>
+    <button id="copy-phone" class="primary-btn" style="padding:6px;font-size:10px;">📋 ቁጥር ኮፒ አድርግ</button>
+  </div>
+
   <div class="wallet-buttons-row">
     <button id="show-deposit" class="primary-btn">📥 DEPOSIT</button>
     <button id="show-withdraw" class="success-btn">📤 WITHDRAW</button>
@@ -489,8 +495,8 @@ INDEX_HTML = r"""<!doctype html>
 </nav>
 </main><div id="toast"></div><script src="/static/app.js"></script></body></html>"""
 
-ADMIN_HTML = r"""<!doctype html><html lang="am"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Flash Bingo Admin</title><link rel="stylesheet" href="/static/style.css"><style>.admin{max-width:700px;margin:auto;padding:16px}.req{background:#0b2113;border:1px solid #20552d;padding:12px;border-radius:10px;margin-bottom:10px}</style></head>
-<body class="admin"><header><h1>🛡 Flash Bingo አድሚን ፓነል</h1><button id="refresh" class="primary-btn">⟳ አዲስ</button></header>
+ADMIN_HTML = r"""<!doctype html><html lang="am"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Besh Besh Bingo Admin</title><link rel="stylesheet" href="/static/style.css"><style>.admin{max-width:700px;margin:auto;padding:16px}.req{background:#0b2113;border:1px solid #20552d;padding:12px;border-radius:10px;margin-bottom:10px}</style></head>
+<body class="admin"><header><h1>🛡 በሽ በሽ ቢንጎ አድሚን ፓነል</h1><button id="refresh" class="primary-btn">⟳ አዲስ</button></header>
 <section style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:15px 0">
   <div class="req"><span>ተጫዋቾች</span><strong id="u-count">—</strong></div>
   <div class="req"><span>ጠቅላላ ብር</span><strong id="t-cred">—</strong></div>
@@ -533,6 +539,7 @@ STYLE_CSS = r""":root{color-scheme:dark;--bg:#041509;--panel:#0b2113;--panel2:#1
 .primary-btn,.success-btn{padding:12px;border-radius:10px;font-weight:800;border:0;cursor:pointer;font-size:12px}
 .primary-btn{background:var(--panel2);border:1px solid var(--line);color:var(--text)}
 .success-btn{background:var(--teal);color:#041509}
+.payment-info-box{background:var(--panel2);border:1px solid var(--line);padding:8px;border-radius:8px;margin-bottom:10px;font-size:12px;display:flex;justify-content:space-between;align-items:center}
 input,select{width:100%;background:var(--panel2);border:1px solid var(--line);padding:10px;border-radius:8px;color:var(--text);margin-bottom:8px;font-size:12px}
 .balance-display-box{background:var(--panel2);padding:10px;border-radius:8px;margin-bottom:10px;font-size:12px;border:1px solid var(--line)}
 .sub-form{margin-top:10px;padding-top:10px;border-top:1px solid var(--line)}
@@ -590,7 +597,7 @@ document.getElementById('current').textContent=model.current_number??'—';
 if(model.current_number){ speakNumber(model.current_number); }
 if(model.last_winner_card){
   speakWinCard(model.last_winner_card);
-  toast(`ካርድ #${model.last_winner_card} BINGO አሸንፏል!`);
+  toast(`🎉 ካርድ #${model.last_winner_card} BINGO አሸንፏል!`);
 }
 
 const isSelecting=(model.phase==='selecting');
@@ -686,6 +693,11 @@ window.switchTab=function(tab){
   if(tab==='rank')loadRank();
 }
 async function loadRank(){try{const d=await api('/api/miniapp/rank');document.getElementById('rank-list').innerHTML=d.rows.map((r,i)=>`<div style="padding:6px;border-bottom:1px solid #20552d">${i+1}. ${r.name} — <b>${r.credits} ETB</b></div>`).join('');}catch(e){toast(e.message)}}
+
+document.getElementById('copy-phone').onclick=()=>{
+  const phone=document.getElementById('pay-phone').textContent;
+  navigator.clipboard.writeText(phone).then(()=>toast('ስልክ ቁጥር ኮፒ ተደርጓል!'));
+};
 
 document.getElementById('claim').onclick=()=>action('/api/miniapp/claim');
 document.getElementById('show-deposit').onclick=()=>{document.getElementById('deposit-form').style.display='block';document.getElementById('withdraw-form').style.display='none';};
