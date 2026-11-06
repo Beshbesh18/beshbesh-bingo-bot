@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Flash Bingo \u2014 Telegram bot + Telegram Mini App
+\u1260\u123d \u1260\u123d \u1262\u1295\u130e (Besh Besh Bingo) \u2014 Telegram bot + Telegram Mini App
 1-600 Card Selection (50s timer), 1-75 Master Grid & Cards,
 Play/Win Wallets, Deposit/Withdraw, Line Bingo check, and Voice Number Calling.
 
@@ -55,7 +55,7 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
-logger = logging.getLogger("flash-bingo")
+logger = logging.getLogger("besh-besh-bingo")
 
 if not TOKEN:
     raise RuntimeError("Set the TOKEN environment variable to your Telegram bot token.")
@@ -337,8 +337,8 @@ def auto_caller_loop():
 # ------------------------------ Localization & Handlers -------------------------
 TEXT = {
     "am": {
-        "welcome": "\U0001f3b0 \u12a5\u1295\u12b3\u1295 \u12c8\u12f0 Flash Bingo \u1260\u12f0\u1205\u1293 \u1218\u1321!\n\n\u12a0\u1313\u130a \u12a5\u1293 \u1348\u1323\u1295 \u12e8\u1262\u1295\u130e \u1328\u12cb\u1273\u1362",
-        "play": "\U0001f3ae Flash Bingo \u1328\u12cb\u1273",
+        "welcome": "\U0001f3b0 \u12a5\u1295\u12b3\u1295 \u12c8\u12f0 \u1260\u123d \u1260\u123d \u1262\u1295\u130e \u1260\u12f0\u1205\u1293 \u1218\u1321!\n\n\u12a0\u1313\u130a \u12a5\u1293 \u1348\u1323\u1295 \u12e8\u1262\u1295\u130e \u1328\u12cb\u1273\u1362",
+        "play": "\U0001f3ae \u1260\u123d \u1260\u123d \u1262\u1295\u130e \u1328\u12cb\u1273",
         "balance": "\U0001f4b0 \u1240\u122a \u1202\u1233\u1265",
         "rules": "\U0001f4dc \u1215\u130d \u12a5\u1293 \u12f0\u1295\u1266\u127d",
         "wallet": "\U0001f4b3 Wallet / \u12aa\u1235 \u1266\u122d\u1233",
@@ -350,10 +350,14 @@ TEXT = {
         "balance_msg": "\U0001f4b0 \u1240\u122a \u1202\u1233\u1265\u12ce\u1366\n\u12e8\u1218\u132b\u12c8\u127b \u1202\u1233\u1265 (Play): {credits} \u1265\u122d\n\u12e8\u12a0\u1238\u1293\u134a\u1290\u1275 \u1202\u1233\u1265 (Win): {win_credits} \u1265\u122d",
         "rules_msg": "\U0001f4dc \u12f0\u1295\u1266\u127d\n\u2022 \u12e8\u12a0\u1295\u12f5 \u12ab\u122d\u12f5 \u12cb\u130b 10 \u1265\u122d \u1290\u12cd\n\u2022 \u12a81 \u12a5\u1235\u12a8 600 \u12ab\u122d\u12f6\u127d \u1218\u121d\u1228\u1325 \u12ed\u127b\u120b\u120d (\u1262\u1260\u12db 4 \u12ab\u122d\u12f5)\n\u2022 \u12a81 \u12a5\u1235\u12a8 75 \u12eb\u1209 \u1241\u1325\u122e\u127d \u12ed\u1320\u122b\u1209\n\u2022 \u12a0\u1295\u12f5 \u1228\u12f5\u134d\u1363 \u12a0\u121d\u12f5\u1363 \u1230\u12eb\u134d \u12c8\u12ed\u121d \u12a0\u122b\u1271 \u121b\u12d5\u12d8\u1296\u127d \u1232\u121e\u1209 \u1262\u1295\u130e \u1290\u12cd",
         "language_set": "\u124b\u1295\u124b\u12cd \u12c8\u12f0 \u12a0\u121b\u122d\u129b \u1270\u1240\u12ed\u122f\u120d\u1362",
+        "dep_approved": "\u2705 {amount} \u1265\u122d \u12c8\u12f0 \u1202\u1233\u1265\u12ce \u1270\u1328\u121d\u122f\u120d\u1362 \u1218\u120d\u12ab\u121d \u1328\u12cb\u1273!",
+        "dep_rejected": "\u274c \u12e8{amount} \u1265\u122d \u12e8\u1308\u1295\u12d8\u1265 \u121b\u1235\u1308\u1262\u12eb \u1325\u12eb\u1244\u12ce \u12cd\u12f5\u1245 \u1270\u12f0\u122d\u1313\u120d\u1362 \u12a5\u1263\u12ad\u12ce \u12a0\u1235\u1270\u12f3\u12f3\u122a\u12cd\u1295 \u12eb\u1290\u130b\u130d\u1229\u1362",
+        "wd_paid": "\u2705 \u12e8{amount} \u1265\u122d \u12e8\u121b\u12cd\u132b \u1325\u12eb\u1244\u12ce \u1270\u12a8\u134d\u120f\u120d\u1362",
+        "wd_rejected": "\u274c \u12e8{amount} \u1265\u122d \u12e8\u121b\u12cd\u132b \u1325\u12eb\u1244\u12ce \u12cd\u12f5\u1245 \u1270\u12f0\u122d\u1313\u120d\u1364 \u1265\u1229 \u12c8\u12f0 \u12a0\u1238\u1293\u134a\u1290\u1275 \u1202\u1233\u1265\u12ce \u1270\u1218\u120d\u1237\u120d\u1362",
     },
     "en": {
-        "welcome": "\U0001f3b0 Welcome to Flash Bingo!\n\nFast and exciting bingo gaming platform.",
-        "play": "\U0001f3ae Play Flash Bingo",
+        "welcome": "\U0001f3b0 Welcome to Besh Besh Bingo!\n\nFast and exciting bingo gaming platform.",
+        "play": "\U0001f3ae Play Besh Besh Bingo",
         "balance": "\U0001f4b0 Balance",
         "rules": "\U0001f4dc Rules",
         "wallet": "\U0001f4b3 Wallet",
@@ -365,6 +369,10 @@ TEXT = {
         "balance_msg": "\U0001f4b0 Your balance:\nPlay Wallet: {credits} ETB\nWin Wallet: {win_credits} ETB",
         "rules_msg": "\U0001f4dc Rules\n\u2022 Card cost: 10 ETB\n\u2022 Pick cards from 1 to 600\n\u2022 Numbers called from 1 to 75\n\u2022 A full row, column, diagonal or the four corners wins BINGO",
         "language_set": "Language changed to English.",
+        "dep_approved": "\u2705 {amount} ETB was added to your balance. Good luck!",
+        "dep_rejected": "\u274c Your {amount} ETB deposit request was rejected. Please contact the administrator.",
+        "wd_paid": "\u2705 Your {amount} ETB withdrawal has been paid.",
+        "wd_rejected": "\u274c Your {amount} ETB withdrawal was rejected; the amount is back in your Win wallet.",
     },
 }
 
@@ -392,7 +400,7 @@ def webapp_url():
 def start_keyboard():
     if PUBLIC_URL:
         return InlineKeyboardMarkup([[
-            InlineKeyboardButton("\u26a1 Flash Bingo \u12ad\u1348\u1275", web_app=WebAppInfo(url=webapp_url()))
+            InlineKeyboardButton("\u26a1 \u1260\u123d \u1260\u123d \u1262\u1295\u130e \u12ad\u1348\u1275", web_app=WebAppInfo(url=webapp_url()))
         ]])
     return None
 
@@ -406,7 +414,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text(text, reply_markup=markup)
     else:
         await update.effective_message.reply_text(text)
-    await update.effective_message.reply_text("Flash Bingo \u26a1", reply_markup=main_keyboard(user.id))
+    await update.effective_message.reply_text("\u1260\u123d \u1260\u123d \u1262\u1295\u130e \u26a1", reply_markup=main_keyboard(user.id))
 
 
 async def language_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -426,10 +434,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = get_language(user.id)
     t = TEXT.get(lang, TEXT["am"])
 
-    if msg in (t["play"], "\U0001f3ae Flash Bingo \u1328\u12cb\u1273", "\U0001f3ae Play Flash Bingo"):
+    if msg in (t["play"], "\U0001f3ae \u1260\u123d \u1260\u123d \u1262\u1295\u130e \u1328\u12cb\u1273", "\U0001f3ae Play Besh Besh Bingo",
+               "\U0001f3ae Flash Bingo \u1328\u12cb\u1273", "\U0001f3ae Play Flash Bingo"):
         markup = start_keyboard()
         if markup:
-            await update.effective_message.reply_text("Flash Bingo \u26a1", reply_markup=markup)
+            await update.effective_message.reply_text("\u1260\u123d \u1260\u123d \u1262\u1295\u130e \u26a1", reply_markup=markup)
         else:
             await update.effective_message.reply_text("Set RENDER_EXTERNAL_URL to enable the Mini App.")
     elif msg in (t["balance"], "\U0001f4b0 \u1265\u122d \u1202\u1233\u1265", "\U0001f4b0 \u1240\u122a \u1202\u1233\u1265", "\U0001f4b0 Balance"):
@@ -447,7 +456,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             rows = con.execute(
                 "SELECT username, first_name, win_credits FROM users ORDER BY win_credits DESC LIMIT 10"
             ).fetchall()
-        lines = ["\U0001f3c6 Top Flash Players"]
+        lines = ["\U0001f3c6 \u12a8\u134d\u1270\u129b \u1270\u132b\u12cb\u127e\u127d (Top Players)"]
         for i, r in enumerate(rows, 1):
             name = ("@" + r["username"]) if r["username"] else (r["first_name"] or "Player")
             lines.append(f"{i}. {name} \u2014 {r['win_credits']} ETB")
@@ -467,20 +476,65 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if PUBLIC_URL:
         keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("\U0001f6e1 Open Flash Admin Panel", web_app=WebAppInfo(url=PUBLIC_URL + "/admin"))
+            InlineKeyboardButton("\U0001f6e1 Open Admin Panel", web_app=WebAppInfo(url=PUBLIC_URL + "/admin"))
         ]])
         await update.effective_message.reply_text("\U0001f6e1 Admin panel", reply_markup=keyboard)
     else:
         await update.effective_message.reply_text("Admin panel unavailable until RENDER_EXTERNAL_URL is configured.")
 
 
+async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shows the Telegram ID of the user and of the chat (use it to fill ADMIN_IDS / LIVE_CHAT_ID)."""
+    await update.effective_message.reply_text(
+        "\U0001f464 Your Telegram ID: %s\n\U0001f4ac This chat ID: %s" % (update.effective_user.id, update.effective_chat.id))
+
+
+async def handle_review_button(query, data, admin_id):
+    try:
+        kind, decision, rid = data.split(":")
+        rid = int(rid)
+    except ValueError:
+        await query.answer("Invalid request", show_alert=True)
+        return
+    loop = asyncio.get_running_loop()
+    if kind == "dep" and decision in ("approve", "reject"):
+        row = await loop.run_in_executor(None, review_deposit, rid, decision, admin_id)
+        label = "\u2705 \u1338\u12f5\u124b\u120d" if decision == "approve" else "\u274c \u12cd\u12f5\u1245 \u1270\u12f0\u122d\u1313\u120d"
+    elif kind == "wd" and decision in ("paid", "reject"):
+        row = await loop.run_in_executor(None, review_withdraw, rid, decision)
+        label = "\u2705 \u1270\u12a8\u134d\u120f\u120d" if decision == "paid" else "\u274c \u12cd\u12f5\u1245 \u1270\u12f0\u122d\u1313\u120d (\u1265\u1229 \u1270\u1218\u120d\u1237\u120d)"
+    else:
+        await query.answer("Invalid request", show_alert=True)
+        return
+    if row is None:
+        await query.answer("\u12ed\u1205 \u1325\u12eb\u1244 \u1240\u12f0\u121d \u1265\u120e \u1270\u1235\u1270\u1293\u130d\u12f7\u120d", show_alert=True)
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        return
+    await query.answer(label)
+    try:
+        await query.edit_message_text((query.message.text or "") + "\n\n" + label)
+    except Exception:
+        logger.exception("could not update the admin message")
+
+
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    data = query.data or ""
     user_id = query.from_user.id
+    if data.startswith(("dep:", "wd:")):
+        # buttons also work inside a group, so only real admins may press them
+        if user_id not in ADMIN_IDS:
+            await query.answer("\U0001f6ab Unauthorized", show_alert=True)
+            return
+        await handle_review_button(query, data, user_id)
+        return
+    await query.answer()
     ensure_user(user_id, query.from_user.username, query.from_user.first_name)
-    if query.data.startswith("lang:"):
-        lang = query.data.split(":", 1)[1]
+    if data.startswith("lang:"):
+        lang = data.split(":", 1)[1]
         if lang in ("am", "en"):
             set_language(user_id, lang)
             await query.edit_message_text(TEXT[lang]["language_set"])
@@ -488,6 +542,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 bot_application.add_handler(CommandHandler("start", start))
 bot_application.add_handler(CommandHandler("language", language_command))
+bot_application.add_handler(CommandHandler("id", id_command))
 bot_application.add_handler(CommandHandler("admin", admin_command))
 bot_application.add_handler(CallbackQueryHandler(callback_handler))
 bot_application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
@@ -548,12 +603,109 @@ def to_positive_float(value):
     return v if v > 0 else None
 
 
+# ------------------------- Admin notifications & reviews -------------------------
+def admin_chat_ids():
+    ids = set(ADMIN_IDS)
+    if LIVE_CHAT_ID:
+        try:
+            ids.add(int(LIVE_CHAT_ID))
+        except ValueError:
+            logger.warning("LIVE_CHAT_ID must be a number such as -1001234567890")
+    return ids
+
+
+def send_to_chat(chat_id, text, markup=None):
+    """Send a Telegram message from any thread. Never raises."""
+    async def _send():
+        try:
+            await bot_application.bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
+        except Exception:
+            logger.exception("could not send a message to chat %s", chat_id)
+    try:
+        if bot_loop.is_running():
+            asyncio.run_coroutine_threadsafe(_send(), bot_loop)
+    except Exception:
+        logger.exception("send_to_chat failed")
+
+
+def notify_admins(text, markup=None):
+    chats = admin_chat_ids()
+    if not chats:
+        logger.warning("ADMIN_IDS and LIVE_CHAT_ID are empty: nobody can be notified.")
+    for cid in chats:
+        send_to_chat(cid, text, markup)
+
+
+def money(x):
+    return ("%.2f" % float(x)).rstrip("0").rstrip(".")
+
+
+def notify_deposit(req_id, uid, method, amount, ref):
+    text = ("\U0001f4b0 \u12a0\u12f2\u1235 \u12e8\u1308\u1295\u12d8\u1265 \u121b\u1235\u1308\u1262\u12eb \u1325\u12eb\u1244 #%d\n\n"
+            "\u1270\u132b\u12cb\u127d: %s (ID %s)\n\u1263\u1295\u12ad: %s\n\u1218\u1320\u1295: %s \u1265\u122d\nTransaction ID: %s\n\n"
+            "\u12ad\u134d\u12eb\u12cd \u12c8\u12f0 \u12a0\u12ab\u12cd\u1295\u1275\u1205 \u1218\u130d\u1263\u1271\u1295 \u1260\u1263\u1295\u12ad/Telebirr \u1218\u120d\u12a5\u12ad\u1275\u1205 \u12a0\u1228\u130b\u130d\u1320\u1205 \u121d\u1228\u1325\u1362"
+            % (req_id, display_name(uid), uid, method, money(amount), ref))
+    markup = InlineKeyboardMarkup([[
+        InlineKeyboardButton("\u2705 \u12a0\u133d\u12f5\u1245", callback_data="dep:approve:%d" % req_id),
+        InlineKeyboardButton("\u274c \u12cd\u12f5\u1245 \u12a0\u12f5\u122d\u130d", callback_data="dep:reject:%d" % req_id),
+    ]])
+    notify_admins(text, markup)
+
+
+def notify_withdraw(req_id, uid, account_info, amount):
+    text = ("\U0001f4e4 \u12a0\u12f2\u1235 \u12e8\u121b\u12cd\u1323\u1275 \u1325\u12eb\u1244 #%d\n\n"
+            "\u1270\u132b\u12cb\u127d: %s (ID %s)\n\u1218\u1320\u1295: %s \u1265\u122d\n\u12e8\u12a0\u12ab\u12cd\u1295\u1275 \u1218\u1228\u1303: %s\n\n"
+            "\u1265\u1229\u1295 \u12a8\u120b\u12ad\u1205 \u1260\u128b\u120b \u00ab\u1270\u12a8\u134d\u120f\u120d\u00bb \u1295 \u1270\u132b\u1295\u1362 \u12cd\u12f5\u1245 \u12ab\u12f0\u1228\u130d\u1205 \u1265\u1229 \u12c8\u12f0 \u1270\u132b\u12cb\u1279 \u12ed\u1218\u1208\u1233\u120d\u1362"
+            % (req_id, display_name(uid), uid, money(amount), account_info))
+    markup = InlineKeyboardMarkup([[
+        InlineKeyboardButton("\u2705 \u1270\u12a8\u134d\u120f\u120d", callback_data="wd:paid:%d" % req_id),
+        InlineKeyboardButton("\u274c \u12cd\u12f5\u1245 (\u1265\u1229\u1295 \u1218\u120d\u1235)", callback_data="wd:reject:%d" % req_id),
+    ]])
+    notify_admins(text, markup)
+
+
+def review_deposit(req_id, decision, admin_id):
+    """Approve/reject a pending deposit exactly once. Returns the request row, or None if not pending."""
+    status = "approved" if decision == "approve" else "rejected"
+    with closing(db()) as con:
+        cur = con.execute(
+            "UPDATE deposit_requests SET status=?, reviewed_at=CURRENT_TIMESTAMP, reviewed_by=? "
+            "WHERE id=? AND status='pending'", (status, int(admin_id), req_id))
+        if cur.rowcount != 1:
+            con.commit()
+            return None
+        row = con.execute("SELECT * FROM deposit_requests WHERE id=?", (req_id,)).fetchone()
+        if decision == "approve":
+            con.execute("UPDATE users SET credits=credits+? WHERE user_id=?", (row["amount"], row["user_id"]))
+        con.commit()
+    send_to_chat(row["user_id"], tr(row["user_id"], "dep_" + status, amount=money(row["amount"])))
+    return row
+
+
+def review_withdraw(req_id, decision):
+    """Mark a pending withdrawal as paid, or reject it and refund the Win wallet. Returns the row or None."""
+    status = "paid" if decision == "paid" else "rejected"
+    with closing(db()) as con:
+        cur = con.execute("UPDATE withdraw_requests SET status=? WHERE id=? AND status='pending'",
+                          (status, req_id))
+        if cur.rowcount != 1:
+            con.commit()
+            return None
+        row = con.execute("SELECT * FROM withdraw_requests WHERE id=?", (req_id,)).fetchone()
+        if status == "rejected":
+            con.execute("UPDATE users SET win_credits=win_credits+? WHERE user_id=?",
+                        (row["amount"], row["user_id"]))
+        con.commit()
+    send_to_chat(row["user_id"], tr(row["user_id"], "wd_" + status, amount=money(row["amount"])))
+    return row
+
+
 # ------------------------------ HTML & JS Assets ---------------------------
 INDEX_HTML = r"""<!doctype html>
-<html lang="am"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="theme-color" content="#06180d"><title>Flash Bingo</title><script src="https://telegram.org/js/telegram-web-app.js"></script><link rel="stylesheet" href="/static/style.css"></head>
+<html lang="am"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="theme-color" content="#06180d"><title>&#x1260;&#x123D; &#x1260;&#x123D; &#x1262;&#x1295;&#x130E;</title><script src="https://telegram.org/js/telegram-web-app.js"></script><link rel="stylesheet" href="/static/style.css"></head>
 <body><main class="app-shell">
 <header class="topbar">
-  <div class="brand-info"><div class="eyebrow">&#x26A1; FLASH BINGO &#xB7; v4</div><h1 id="round-title">&#x12D9;&#x122D; #1</h1></div>
+  <div class="brand-info"><div class="eyebrow">&#x26A1; &#x1260;&#x123D; &#x1260;&#x123D; &#x1262;&#x1295;&#x130E; &#xB7; v6</div><h1 id="round-title">&#x12D9;&#x122D; #1</h1></div>
   <div class="top-scores">
     <div class="score-box"><span>PLAY</span><strong id="play-bal">0.00</strong></div>
     <div class="score-box win"><span>WIN</span><strong id="win-bal">0.00</strong></div>
@@ -626,14 +778,14 @@ INDEX_HTML = r"""<!doctype html>
 <div id="win-overlay" class="win-overlay" style="display:none"><div class="win-box"><div class="win-title">&#x1F389; BINGO! &#x1F389;</div><div id="win-names" class="win-line"></div><div id="win-prize" class="win-line"></div><div id="win-next" class="win-sub"></div></div></div>
 <div id="toast"></div><script src="/static/app.js"></script></body></html>"""
 
-ADMIN_HTML = r"""<!doctype html><html lang="am"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Flash Bingo Admin</title><script src="https://telegram.org/js/telegram-web-app.js"></script><link rel="stylesheet" href="/static/style.css"><style>.admin{max-width:700px;margin:auto;padding:16px}.req{background:#0b2113;border:1px solid #20552d;padding:12px;border-radius:10px;margin-bottom:10px}.req span{display:block;font-size:11px;color:#a3b8a8}</style></head>
-<body class="admin"><header><h1>&#x1F6E1; Flash Bingo &#x12E8;&#x12A0;&#x1235;&#x1270;&#x12F3;&#x12F3;&#x122A; &#x1353;&#x1290;&#x120D;</h1><button id="refresh" class="primary-btn">&#x27F3; &#x12A0;&#x12F5;&#x1235;</button></header>
+ADMIN_HTML = r"""<!doctype html><html lang="am"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>&#x1260;&#x123D; &#x1260;&#x123D; &#x1262;&#x1295;&#x130E; Admin</title><script src="https://telegram.org/js/telegram-web-app.js"></script><link rel="stylesheet" href="/static/style.css"><style>.admin{max-width:700px;margin:auto;padding:16px}.req{background:#0b2113;border:1px solid #20552d;padding:12px;border-radius:10px;margin-bottom:10px}.req span{display:block;font-size:11px;color:#a3b8a8}</style></head>
+<body class="admin"><header><h1>&#x1F6E1; &#x1260;&#x123D; &#x1260;&#x123D; &#x1262;&#x1295;&#x130E; &#x12E8;&#x12A0;&#x1235;&#x1270;&#x12F3;&#x12F3;&#x122A; &#x1353;&#x1290;&#x120D;</h1><button id="refresh" class="primary-btn">&#x27F3; &#x12A0;&#x12F5;&#x1235;</button></header>
 <section style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:15px 0">
   <div class="req"><span>&#x1270;&#x132B;&#x12CB;&#x127E;&#x127D;</span><strong id="u-count">&#x2014;</strong></div>
   <div class="req"><span>&#x1320;&#x1245;&#x120B;&#x120B; &#x1265;&#x122D;</span><strong id="t-cred">&#x2014;</strong></div>
   <div class="req"><span>&#x1260;&#x1218;&#x1320;&#x1263;&#x1260;&#x1245; &#x120B;&#x12ED;</span><strong id="p-count">&#x2014;</strong></div>
 </section>
-<h2>&#x12E8;&#x12AD;&#x134D;&#x12EB; &#x1325;&#x12EB;&#x1244;&#x12CE;&#x127D;</h2><div id="req-list">&#x1260;&#x1218;&#x132B;&#x1295; &#x120B;&#x12ED;...</div><script src="/static/admin.js"></script></body></html>"""
+<h2>&#x12E8;&#x1308;&#x1295;&#x12D8;&#x1265; &#x121B;&#x1235;&#x1308;&#x1262;&#x12EB; &#x1325;&#x12EB;&#x1244;&#x12CE;&#x127D;</h2><div id="req-list">&#x1260;&#x1218;&#x132B;&#x1295; &#x120B;&#x12ED;...</div><h2>&#x12E8;&#x121B;&#x12CD;&#x1323;&#x1275; &#x1325;&#x12EB;&#x1244;&#x12CE;&#x127D;</h2><div id="wd-list">&#x1260;&#x1218;&#x132B;&#x1295; &#x120B;&#x12ED;...</div><script src="/static/admin.js"></script></body></html>"""
 
 STYLE_CSS = r""":root{color-scheme:dark;--bg:#041509;--panel:#0b2113;--panel2:#102d19;--line:#20552d;--text:#f4f7f4;--muted:#a3b8a8;--gold:#ffe629;--teal:#39d66f}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);font-family:system-ui,"Noto Sans Ethiopic","Nyala","Abyssinica SIL",sans-serif;color:var(--text);padding-bottom:70px}
@@ -959,6 +1111,7 @@ refresh(); setInterval(refresh, 1000);
 
 ADMIN_JS = r"""const HEADERS = () => ({'Content-Type': 'application/json', 'X-Telegram-Init-Data': window.Telegram?.WebApp?.initData || ''});
 function esc(s) { const d = document.createElement('div'); d.textContent = String(s ?? ''); return d.innerHTML; }
+const BTN = 'border:0;padding:6px 12px;border-radius:6px;font-weight:bold;margin-right:6px;cursor:pointer;';
 
 async function load() {
   const r = await fetch('/api/admin/overview', {headers: HEADERS()});
@@ -969,15 +1122,27 @@ async function load() {
   document.getElementById('p-count').textContent = d.pending_count;
   document.getElementById('req-list').innerHTML = d.requests.map(q => {
     const buttons = q.status === 'pending'
-      ? `<button onclick="review(${Number(q.id)},'approve')" style="background:#39d66f;border:0;padding:6px 12px;border-radius:6px;font-weight:bold">\u12A0\u133D\u12F5\u1245</button>
-         <button onclick="review(${Number(q.id)},'reject')" style="background:#d63939;border:0;padding:6px 12px;border-radius:6px;font-weight:bold;color:#fff">\u12CD\u12F5\u1245</button>`
+      ? `<button onclick="review(${Number(q.id)},'approve')" style="${BTN}background:#39d66f">\u12A0\u133D\u12F5\u1245</button>` +
+        `<button onclick="review(${Number(q.id)},'reject')" style="${BTN}background:#d63939;color:#fff">\u12CD\u12F5\u1245</button>`
       : `<i>${esc(q.status)}</i>`;
     return `<div class="req"><b>#${Number(q.id)} \u00B7 ${esc(q.amount)} \u1265\u122D (${esc(q.method)})</b>
       <p>User: ${esc(q.user_id)} | Ref: ${esc(q.reference)}</p>${buttons}</div>`;
-  }).join('');
+  }).join('') || '\u2014';
+  document.getElementById('wd-list').innerHTML = (d.withdrawals || []).map(q => {
+    const buttons = q.status === 'pending'
+      ? `<button onclick="reviewWd(${Number(q.id)},'paid')" style="${BTN}background:#39d66f">\u1270\u12A8\u134D\u120F\u120D</button>` +
+        `<button onclick="reviewWd(${Number(q.id)},'reject')" style="${BTN}background:#d63939;color:#fff">\u12CD\u12F5\u1245 (\u1265\u1229\u1295 \u1218\u120D\u1235)</button>`
+      : `<i>${esc(q.status)}</i>`;
+    return `<div class="req"><b>#${Number(q.id)} \u00B7 ${esc(q.amount)} \u1265\u122D</b>
+      <p>User: ${esc(q.user_id)} | ${esc(q.account_info)}</p>${buttons}</div>`;
+  }).join('') || '\u2014';
 }
 async function review(id, decision) {
   await fetch(`/api/admin/deposit/${id}/review`, {method: 'POST', headers: HEADERS(), body: JSON.stringify({decision})});
+  load();
+}
+async function reviewWd(id, decision) {
+  await fetch(`/api/admin/withdraw/${id}/review`, {method: 'POST', headers: HEADERS(), body: JSON.stringify({decision})});
   load();
 }
 document.getElementById('refresh').onclick = load; load();
@@ -1147,9 +1312,11 @@ def api_miniapp_deposit():
     if not amt or not ref or method not in ("Telebirr", "CBE Birr"):
         return json_error("\u12a5\u1263\u12ad\u12ce \u1218\u1228\u1303\u12cd\u1295 \u12ed\u1219\u1209")
     with closing(db()) as con:
-        con.execute("INSERT INTO deposit_requests(user_id, method, amount, reference) VALUES(?,?,?,?)",
-                    (user["id"], method, amt, ref))
+        cur = con.execute("INSERT INTO deposit_requests(user_id, method, amount, reference) VALUES(?,?,?,?)",
+                          (user["id"], method, amt, ref))
+        req_id = cur.lastrowid
         con.commit()
+    notify_deposit(req_id, user["id"], method, amt, ref)
     return jsonify({"message": "\u12e8\u1308\u1295\u12d8\u1265 \u121b\u1235\u1308\u1262\u12eb \u1325\u12eb\u1244\u12ce \u1270\u120d\u12b3\u120d"})
 
 
@@ -1169,9 +1336,11 @@ def api_miniapp_withdraw():
             return json_error("\u1260\u12a0\u1238\u1293\u134a\u1290\u1275 \u1202\u1233\u1265\u12ce (Win Wallet) \u12cd\u1235\u1325 \u1260\u1242 \u1308\u1295\u12d8\u1265 \u12e8\u1208\u121d")
         update_credits(user["id"], -amt, is_win=True)
         with closing(db()) as con:
-            con.execute("INSERT INTO withdraw_requests(user_id, account_info, amount) VALUES(?,?,?)",
-                        (user["id"], account_info, amt))
+            cur = con.execute("INSERT INTO withdraw_requests(user_id, account_info, amount) VALUES(?,?,?)",
+                              (user["id"], account_info, amt))
+            req_id = cur.lastrowid
             con.commit()
+    notify_withdraw(req_id, user["id"], account_info, amt)
     return jsonify({"message": "\u12e8\u1308\u1295\u12d8\u1265 \u121b\u12cd\u132b \u1325\u12eb\u1244\u12ce \u1270\u120d\u12b3\u120d"})
 
 
@@ -1194,9 +1363,11 @@ def admin_overview():
         uc = con.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         tc = con.execute("SELECT COALESCE(SUM(credits+win_credits),0) FROM users").fetchone()[0]
         pc = con.execute("SELECT COUNT(*) FROM deposit_requests WHERE status='pending'").fetchone()[0]
+        pw = con.execute("SELECT COUNT(*) FROM withdraw_requests WHERE status='pending'").fetchone()[0]
         reqs = con.execute("SELECT * FROM deposit_requests ORDER BY id DESC LIMIT 50").fetchall()
-        return jsonify({"users_count": uc, "total_credits": tc, "pending_count": pc,
-                        "requests": [dict(r) for r in reqs]})
+        wds = con.execute("SELECT * FROM withdraw_requests ORDER BY id DESC LIMIT 50").fetchall()
+        return jsonify({"users_count": uc, "total_credits": tc, "pending_count": pc + pw,
+                        "requests": [dict(r) for r in reqs], "withdrawals": [dict(r) for r in wds]})
 
 
 @app.post("/api/admin/deposit/<int:req_id>/review")
@@ -1208,17 +1379,22 @@ def admin_review(req_id):
     decision = body.get("decision")
     if decision not in ("approve", "reject"):
         return json_error("Invalid decision")
-    with closing(db()) as con:
-        row = con.execute("SELECT * FROM deposit_requests WHERE id=?", (req_id,)).fetchone()
-        if not row or row["status"] != "pending":
-            return json_error("Invalid request")
-        status = "approved" if decision == "approve" else "rejected"
-        con.execute(
-            "UPDATE deposit_requests SET status=?, reviewed_at=CURRENT_TIMESTAMP, reviewed_by=? WHERE id=?",
-            (status, int(user["id"]), req_id))
-        if decision == "approve":
-            con.execute("UPDATE users SET credits=credits+? WHERE user_id=?", (row["amount"], row["user_id"]))
-        con.commit()
+    if review_deposit(req_id, decision, user["id"]) is None:
+        return json_error("Invalid request")
+    return jsonify({"ok": True, "message": "\u1270\u1228\u130b\u130d\u1327\u120d"})
+
+
+@app.post("/api/admin/withdraw/<int:req_id>/review")
+def admin_review_withdraw(req_id):
+    user = api_admin()
+    if not user:
+        return json_error("Admin access denied", 403)
+    body = request.get_json(silent=True) or {}
+    decision = body.get("decision")
+    if decision not in ("paid", "reject"):
+        return json_error("Invalid decision")
+    if review_withdraw(req_id, decision) is None:
+        return json_error("Invalid request")
     return jsonify({"ok": True, "message": "\u1270\u1228\u130b\u130d\u1327\u120d"})
 
 
