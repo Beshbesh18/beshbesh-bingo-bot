@@ -16,6 +16,7 @@ import logging
 import asyncio
 import threading
 import random
+import re
 import sqlite3
 from urllib.parse import parse_qsl
 from contextlib import closing
@@ -23,7 +24,7 @@ from contextlib import closing
 from flask import Flask, request, Response, jsonify
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo,
-    ReplyKeyboardMarkup, KeyboardButton,
+    ReplyKeyboardMarkup, KeyboardButton, BotCommand, MenuButtonCommands,
 )
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, MessageHandler,
@@ -43,7 +44,13 @@ DATABASE_PATH = os.environ.get("DATABASE_PATH", "bingo.sqlite3")
 os.makedirs(os.path.dirname(os.path.abspath(DATABASE_PATH)), exist_ok=True)
 
 CARD_COST = 10
-STARTING_CREDITS = 100
+# Free credits every account gets when it first opens the bot. Default 100 (unchanged);
+# set the STARTING_CREDITS environment variable on Render (e.g. 0) to change it.
+try:
+    STARTING_CREDITS = float(os.environ.get("STARTING_CREDITS", "100"))
+except ValueError:
+    STARTING_CREDITS = 100.0
+NEW_USER_BONUS = 10  # welcome bonus (ETB) for a NEW user who shares his phone contact
 MAX_CARDS_PER_PLAYER = 4
 SELECTION_TIME_SECONDS = 50
 CALL_INTERVAL_SECONDS = 3
@@ -115,6 +122,13 @@ def init_db():
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
         """)
+        cols = {r["name"] for r in con.execute("PRAGMA table_info(users)").fetchall()}
+        if "phone" not in cols:
+            con.execute("ALTER TABLE users ADD COLUMN phone TEXT")
+        if "bonus_given" not in cols:
+            con.execute("ALTER TABLE users ADD COLUMN bonus_given INTEGER NOT NULL DEFAULT 0")
+            # accounts that already exist are not "new": they get no welcome bonus
+            con.execute("UPDATE users SET bonus_given=1")
         con.commit()
 
 
@@ -141,6 +155,63 @@ def update_credits(user_id, delta, is_win=False):
         con.commit()
         row = con.execute("SELECT credits, win_credits FROM users WHERE user_id=?", (int(user_id),)).fetchone()
         return row[col] if row else 0.0
+
+
+def charge_card(user_id):
+    """Take CARD_COST from the Play wallet; if that is too low take it from the Win wallet.
+    Returns "credits", "win" (which wallet paid) or None (not enough money). Atomic."""
+    with closing(db()) as con:
+        cur = con.execute(
+            "UPDATE users SET credits=credits-? WHERE user_id=? AND credits>=?",
+            (CARD_COST, int(user_id), CARD_COST))
+        if cur.rowcount:
+            con.commit()
+            return "credits"
+        cur = con.execute(
+            "UPDATE users SET win_credits=win_credits-? WHERE user_id=? AND win_credits>=?",
+            (CARD_COST, int(user_id), CARD_COST))
+        con.commit()
+        return "win" if cur.rowcount else None
+
+
+def refund_card(user_id, wallet):
+    """Give the card price back to the wallet it was paid from."""
+    update_credits(user_id, CARD_COST, is_win=(wallet == "win"))
+
+
+def get_phone(user_id):
+    row = get_user(user_id)
+    return row["phone"] if row else None
+
+
+def register_phone(user_id, phone):
+    """Save the shared phone number. Returns:
+    'bonus'   - new user, NEW_USER_BONUS was added to his Play wallet
+    'saved'   - number saved, no bonus (old account)
+    'dup'     - this number already belongs to another account, no bonus
+    'already' - this account already shared a number"""
+    uid = int(user_id)
+    with closing(db()) as con:
+        con.execute("BEGIN IMMEDIATE")
+        row = con.execute("SELECT phone, bonus_given FROM users WHERE user_id=?", (uid,)).fetchone()
+        if row is None or row["phone"]:
+            con.rollback()
+            return "already"
+        used = con.execute(
+            "SELECT 1 FROM users WHERE phone=? AND user_id!=?", (phone, uid)).fetchone()
+        if used:
+            con.execute("UPDATE users SET phone=?, bonus_given=1 WHERE user_id=?", (phone, uid))
+            result = "dup"
+        elif row["bonus_given"]:
+            con.execute("UPDATE users SET phone=? WHERE user_id=?", (phone, uid))
+            result = "saved"
+        else:
+            con.execute(
+                "UPDATE users SET phone=?, bonus_given=1, credits=credits+? WHERE user_id=?",
+                (phone, float(NEW_USER_BONUS), uid))
+            result = "bonus"
+        con.commit()
+        return result
 
 
 def set_language(user_id, language):
@@ -172,6 +243,7 @@ def fresh_game():
         "marked": {},                 # (user_id, card_id) -> set of marked numbers/FREE
         "finished_ends_at": 0,        # when the 'finished' (winner shown) phase ends
         "last_winners": [],           # [{user_id, name, card_id, prize}]
+        "card_paid_from": {},         # (user_id, card_id) -> "credits" or "win" wallet
     }
 
 
@@ -215,8 +287,8 @@ def reset_round(refund=False):
     with game_lock:
         if refund:
             for uid, cards in game_state["player_cards"].items():
-                if cards:
-                    update_credits(uid, len(cards) * CARD_COST, is_win=False)
+                for cid in cards:
+                    refund_card(uid, game_state.get("card_paid_from", {}).get((uid, cid), "credits"))
         game_state["round"] += 1
         game_state["phase"] = "selecting"
         game_state["selection_ends_at"] = time.time() + SELECTION_TIME_SECONDS
@@ -228,6 +300,7 @@ def reset_round(refund=False):
         game_state["card_matrices"] = {}
         game_state["marked"] = {}
         game_state["last_winners"] = []
+        game_state["card_paid_from"] = {}
         game_state["finished_ends_at"] = 0
 
 
@@ -377,6 +450,24 @@ TEXT = {
 }
 
 
+TEXT["am"].update({
+    "share_phone": "\U0001f4f1 \u1235\u120d\u12ad \u1241\u1325\u122c\u1295 \u12a0\u130b\u122b",
+    "contact_ask": "\U0001f44b \u12a5\u1295\u12b3\u1295 \u12f0\u1205\u1293 \u1218\u1321!\n\n\U0001f4f1 \u1218\u1208\u12eb\u12ce\u1295 \u1208\u121b\u1228\u130b\u1308\u1325 \u12a5\u1293 \u12e8\U0001f381 {amount} \u1265\u122d \u12e8\u12a5\u1295\u12b3\u1295 \u12f0\u1205\u1293 \u1218\u1321 \u1235\u1326\u1273 \u1208\u121b\u130d\u1298\u1275 \u12a8\u1273\u127d \u12eb\u1208\u12cd\u1295 \u00ab\u1235\u120d\u12ad \u1241\u1325\u122c\u1295 \u12a0\u130b\u122b\u00bb \u1241\u120d\u134d \u12ed\u132b\u1291\u1362",
+    "contact_bonus": "\u2705 \u1235\u120d\u12ad \u1241\u1325\u122d\u12ce \u1270\u1218\u12dd\u130d\u1267\u120d!\n\U0001f381 \u12e8{amount} \u1265\u122d \u12e8\u12a5\u1295\u12b3\u1295 \u12f0\u1205\u1293 \u1218\u1321 \u1235\u1326\u1273 \u12c8\u12f0 \u1218\u132b\u12c8\u127b \u1202\u1233\u1265\u12ce \u1270\u1328\u121d\u122f\u120d\u1362\n\n\u1218\u120d\u12ab\u121d \u12d5\u12f5\u120d!",
+    "contact_saved": "\u2705 \u1235\u120d\u12ad \u1241\u1325\u122d\u12ce \u1270\u1218\u12dd\u130d\u1267\u120d\u1362",
+    "contact_dup": "\u2705 \u1235\u120d\u12ad \u1241\u1325\u122d\u12ce \u1270\u1218\u12dd\u130d\u1267\u120d\u1362 \u12ed\u1205 \u1241\u1325\u122d \u1240\u12f0\u121d \u1232\u120d \u1235\u1326\u1273 \u1235\u1208\u1270\u1240\u1260\u1208 \u12f3\u130d\u121d \u12a0\u120d\u1270\u1230\u1320\u121d\u1362",
+    "contact_wrong": "\u26a0\ufe0f \u12a5\u1263\u12ad\u12ce \u12e8\u122b\u1235\u12ce\u1295 \u1235\u120d\u12ad \u1241\u1325\u122d \u1208\u121b\u130b\u122b\u1275 \u12a8\u1273\u127d \u12eb\u1208\u12cd\u1295 \u1241\u120d\u134d \u12ed\u1320\u1240\u1219\u1362",
+})
+TEXT["en"].update({
+    "share_phone": "\U0001f4f1 Share my phone number",
+    "contact_ask": "\U0001f44b Welcome!\n\n\U0001f4f1 Tap the \"Share my phone number\" button below to verify your account and get a \U0001f381 {amount} ETB welcome bonus.",
+    "contact_bonus": "\u2705 Your phone number is registered!\n\U0001f381 A {amount} ETB welcome bonus was added to your Play wallet.\n\nGood luck!",
+    "contact_saved": "\u2705 Your phone number is registered.",
+    "contact_dup": "\u2705 Your phone number is registered. This number already received a bonus, so it was not given again.",
+    "contact_wrong": "\u26a0\ufe0f Please use the button below to share your own phone number.",
+})
+
+
 def tr(user_id, key, **kwargs):
     lang = get_language(user_id)
     return TEXT.get(lang, TEXT["am"]).get(key, TEXT["am"].get(key, key)).format(**kwargs)
@@ -385,12 +476,17 @@ def tr(user_id, key, **kwargs):
 def main_keyboard(user_id):
     lang = get_language(user_id)
     t = TEXT.get(lang, TEXT["am"])
-    return ReplyKeyboardMarkup([
+    rows = []
+    if not get_phone(user_id):
+        # shown on top of the menu until the user has shared his phone contact
+        rows.append([KeyboardButton(t["share_phone"], request_contact=True)])
+    rows += [
         [KeyboardButton(t["play"]), KeyboardButton(t["balance"])],
         [KeyboardButton(t["wallet"]), KeyboardButton(t["rank"])],
         [KeyboardButton(t["rules"]), KeyboardButton(t["language"])],
         [KeyboardButton(t["support"])],
-    ], resize_keyboard=True)
+    ]
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 
 def webapp_url():
@@ -414,7 +510,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text(text, reply_markup=markup)
     else:
         await update.effective_message.reply_text(text)
-    await update.effective_message.reply_text("\u1260\u123d \u1260\u123d \u1262\u1295\u130e \u26a1", reply_markup=main_keyboard(user.id))
+    if get_phone(user.id):
+        await update.effective_message.reply_text("\u1260\u123d \u1260\u123d \u1262\u1295\u130e \u26a1", reply_markup=main_keyboard(user.id))
+    else:
+        await update.effective_message.reply_text(
+            tr(user.id, "contact_ask", amount=NEW_USER_BONUS), reply_markup=main_keyboard(user.id))
 
 
 async def language_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -489,6 +589,33 @@ async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "\U0001f464 Your Telegram ID: %s\n\U0001f4ac This chat ID: %s" % (update.effective_user.id, update.effective_chat.id))
 
 
+async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """The user pressed the "share my phone number" button."""
+    user = update.effective_user
+    ensure_user(user.id, user.username, user.first_name)
+    contact = update.effective_message.contact
+    # the contact must be his OWN number (not a forwarded / picked contact of someone else)
+    if not contact or contact.user_id != user.id:
+        await update.effective_message.reply_text(
+            tr(user.id, "contact_wrong"), reply_markup=main_keyboard(user.id))
+        return
+    phone = re.sub(r"\D", "", contact.phone_number or "")
+    if not phone:
+        await update.effective_message.reply_text(
+            tr(user.id, "contact_wrong"), reply_markup=main_keyboard(user.id))
+        return
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, register_phone, user.id, phone)
+    if result == "bonus":
+        key = "contact_bonus"
+    elif result == "dup":
+        key = "contact_dup"
+    else:
+        key = "contact_saved"
+    await update.effective_message.reply_text(
+        tr(user.id, key, amount=NEW_USER_BONUS), reply_markup=main_keyboard(user.id))
+
+
 async def handle_review_button(query, data, admin_id):
     try:
         kind, decision, rid = data.split(":")
@@ -541,6 +668,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 bot_application.add_handler(CommandHandler("start", start))
+bot_application.add_handler(CommandHandler("restart", start))
+bot_application.add_handler(MessageHandler(filters.CONTACT, handle_contact))
 bot_application.add_handler(CommandHandler("language", language_command))
 bot_application.add_handler(CommandHandler("id", id_command))
 bot_application.add_handler(CommandHandler("admin", admin_command))
@@ -705,7 +834,7 @@ INDEX_HTML = r"""<!doctype html>
 <html lang="am"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="theme-color" content="#06180d"><title>&#x1260;&#x123D; &#x1260;&#x123D; &#x1262;&#x1295;&#x130E;</title><script src="https://telegram.org/js/telegram-web-app.js"></script><link rel="stylesheet" href="/static/style.css"></head>
 <body><main class="app-shell">
 <header class="topbar">
-  <div class="brand-info"><div class="eyebrow">&#x26A1; &#x1260;&#x123D; &#x1260;&#x123D; &#x1262;&#x1295;&#x130E; &#xB7; v6</div><h1 id="round-title">&#x12D9;&#x122D; #1</h1></div>
+  <div class="brand-info"><div class="eyebrow">&#x26A1; &#x1260;&#x123D; &#x1260;&#x123D; &#x1262;&#x1295;&#x130E; &#xB7; v8</div><h1 id="round-title">&#x12D9;&#x122D; #1</h1></div>
   <div class="top-scores">
     <div class="score-box"><span>PLAY</span><strong id="play-bal">0.00</strong></div>
     <div class="score-box win"><span>WIN</span><strong id="win-bal">0.00</strong></div>
@@ -809,21 +938,21 @@ STYLE_CSS = r""":root{color-scheme:dark;--bg:#041509;--panel:#0b2113;--panel2:#1
 .section-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;font-size:13px}
 .section-header h2{font-size:13px;margin:0}
 .card-count-pill{background:var(--panel2);padding:4px 8px;border-radius:6px;border:1px solid var(--line);font-size:11px;color:var(--teal)}
-.master-grid{display:grid;grid-template-columns:repeat(15,1fr);gap:2px;max-height:220px;overflow-y:auto;background:#06180d;padding:6px;border-radius:10px;border:1px solid var(--line)}
+.master-grid{display:grid;grid-template-columns:repeat(8,1fr);gap:6px;max-height:48vh;overflow-y:auto;-webkit-overflow-scrolling:touch;background:#06180d;padding:8px;border-radius:10px;border:1px solid var(--line)}
 .master-grid-75{display:grid;grid-template-columns:22px repeat(15,1fr);gap:2px;background:#06180d;padding:6px;border-radius:10px;border:1px solid var(--line)}
 .m-letter{display:grid;place-items:center;font-weight:900;color:var(--gold);font-size:12px}
-.picker-btn{aspect-ratio:1;background:var(--panel2);border:1px solid var(--line);border-radius:3px;font-size:8px;display:grid;place-items:center;font-weight:700;color:var(--text);cursor:pointer;padding:0}
+.picker-btn{aspect-ratio:1;min-height:36px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;font-size:14px;display:grid;place-items:center;font-weight:800;color:var(--text);cursor:pointer;padding:0;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
 .picker-btn.taken{background:#331010;color:#777;border-color:#551111;cursor:not-allowed}
 .picker-btn.mine{background:var(--teal);color:#041509;font-weight:900}
 .m-cell{aspect-ratio:1;background:var(--panel2);border-radius:3px;font-size:8px;display:grid;place-items:center;font-weight:700;color:var(--muted)}
 .m-cell.called{background:var(--gold);color:#041509;font-weight:900}
 .called-balls-row{display:flex;gap:4px;overflow-x:auto;margin-top:8px;padding:4px;background:#06180d;border-radius:8px;border:1px solid var(--line)}
 .mini-ball{min-width:24px;height:24px;background:var(--gold);color:#041509;border-radius:50%;display:grid;place-items:center;font-size:10px;font-weight:900}
-.cards-section{display:flex;flex-direction:column;gap:10px;margin-bottom:12px}
-.bingo-card{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:10px}
-.card-title{font-size:12px;font-weight:bold;margin-bottom:6px;color:var(--gold)}
-.card-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:4px}
-.c-cell{aspect-ratio:1;background:#06180d;border:1px solid var(--line);border-radius:6px;font-size:11px;font-weight:800;display:grid;place-items:center;cursor:pointer;color:var(--text)}
+.cards-section{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-bottom:12px}
+.bingo-card{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:6px;min-width:0}
+.card-title{font-size:10px;font-weight:bold;margin-bottom:4px;color:var(--gold);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:2px}
+.c-cell{aspect-ratio:1;min-width:0;background:#06180d;border:1px solid var(--line);border-radius:4px;font-size:clamp(9px,3.2vw,13px);font-weight:800;display:grid;place-items:center;cursor:pointer;color:var(--text);padding:0}
 .c-cell.free{background:#483308;color:var(--gold)}
 .c-cell.called{border-color:var(--teal)}
 .c-cell.marked{background:#114624;color:var(--teal);border-color:var(--teal)}
@@ -934,7 +1063,7 @@ function render() {
 
   document.getElementById('selection-panel').style.display = (isBingo && isSelecting) ? 'block' : 'none';
   document.getElementById('live-game-panel').style.display = (isBingo && !isSelecting) ? 'block' : 'none';
-  document.getElementById('cards-container').style.display = isBingo ? 'flex' : 'none';
+  document.getElementById('cards-container').style.display = isBingo ? 'grid' : 'none';
   document.getElementById('game-actions').style.display = (isBingo && model.phase === 'playing') ? 'grid' : 'none';
   document.getElementById('wallet-section').style.display = tab === 'wallet' ? 'block' : 'none';
   document.getElementById('rank-section').style.display = tab === 'rank' ? 'block' : 'none';
@@ -1246,21 +1375,23 @@ def api_miniapp_select_card():
             game_state["card_matrices"].pop((uid, card_num), None)
             game_state["marked"].pop((uid, card_num), None)
             game_state["prize"] -= CARD_COST
-            update_credits(uid, CARD_COST, is_win=False)
+            refund_card(uid, game_state["card_paid_from"].pop((uid, card_num), "credits"))
             return jsonify({"message": "\u12ab\u122d\u12f1 \u1270\u1230\u122d\u12df\u120d"})
 
-        row = get_user(uid)
-        if (row["credits"] if row else 0.0) < CARD_COST:
-            return json_error("\u1260\u1242 \u1202\u1233\u1265 \u12e8\u1208\u12ce\u1275\u121d (10 \u1265\u122d \u12eb\u1235\u1348\u120d\u130b\u120d)")
         if len(my_cards) >= MAX_CARDS_PER_PLAYER:
-            return json_error("\u12a84 \u12ab\u122d\u12f5 \u1260\u120b\u12ed \u1218\u12eb\u12dd \u12a0\u12ed\u127b\u120d\u121d")
+            return json_error("\u12a84 \u12ab\u122d\u12f5 \u1260\u120b\u12ed \u1218\u12eb\u12dd \u12a0\u12ed\u127d\u120d\u121d")
         if card_num in game_state["taken_card_numbers"]:
             return json_error("\u12ed\u1205 \u12ab\u122d\u12f5 \u1260\u120c\u120b \u1270\u132b\u12cb\u127d \u1270\u12ed\u12df\u120d")
+
+        # Play wallet first; when it is empty the Win wallet pays for the card
+        wallet = charge_card(uid)
+        if wallet is None:
+            return json_error("\u1260\u1242 \u1202\u1233\u1265 \u12e8\u1208\u12ce\u1275\u121d (10 \u1265\u122d \u12eb\u1235\u1348\u120d\u130b\u120d)")
 
         game_state["taken_card_numbers"].add(card_num)
         my_cards.append(card_num)
         game_state["prize"] += CARD_COST
-        update_credits(uid, -CARD_COST, is_win=False)
+        game_state["card_paid_from"][(uid, card_num)] = wallet
         game_state["card_matrices"][(uid, card_num)] = generate_75_bingo_card(card_num * 999 + uid)
         game_state["marked"][(uid, card_num)] = {"FREE"}
 
@@ -1431,6 +1562,16 @@ def start_bot():
     async def initialize():
         await bot_application.initialize()
         await bot_application.start()
+        try:
+            commands = [
+                BotCommand("start", "\u1266\u1271\u1295 \u1300\u121d\u122d / Start"),
+                BotCommand("restart", "\u12a5\u1295\u12f0\u1308\u1293 \u1300\u121d\u122d (\u121c\u1291 \u12a0\u121d\u1323) / Restart"),
+                BotCommand("language", "\u124b\u1295\u124b / Language"),
+            ]
+            await bot_application.bot.set_my_commands(commands)
+            await bot_application.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+        except Exception:
+            logger.exception("could not set the bot commands / menu button")
         if PUBLIC_URL:
             wh = "/telegram-webhook" + (("/" + WEBHOOK_SECRET_PATH) if WEBHOOK_SECRET_PATH else "")
             await bot_application.bot.set_webhook(PUBLIC_URL + wh)
