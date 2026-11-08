@@ -18,8 +18,9 @@ import threading
 import random
 import re
 import sqlite3
-from urllib.parse import parse_qsl
+from urllib.parse import parse_qsl, quote
 from contextlib import closing
+from datetime import datetime, timedelta, timezone
 
 from flask import Flask, request, Response, jsonify
 from telegram import (
@@ -59,6 +60,16 @@ SELECTION_TIME_SECONDS = 50
 CALL_INTERVAL_SECONDS = 3
 MAX_NUMBERS_POOL = 75  # 1 to 75 numbers called in game
 TOTAL_CARDS = 600
+# ---- deposits (Telebirr only) ----
+PAY_NUMBER = os.environ.get("PAY_NUMBER", "0928564065").strip()   # the owner's Telebirr number
+PAY_NAME = os.environ.get("PAY_NAME", "Eineyew").strip()         # the name shown to players
+PAY_TAIL = re.sub(r"\D", "", PAY_NUMBER)[-4:]
+MIN_DEPOSIT = 20          # smallest deposit (ETB)
+REFERRAL_REWARD = 10      # ETB the inviter gets when his invited NEW user makes a first approved deposit
+# Secret for the phone's SMS-forwarding webhook (/api/sms-webhook). Without it the webhook is disabled.
+SMS_SECRET = os.environ.get("SMS_SECRET", "").strip()
+SMS_SENDER = os.environ.get("SMS_SENDER", "").strip()  # optional: only accept SMS from this sender name/number
+RECEIPT_URL = "https://transactioninfo.ethiotelecom.et/receipt/"
 FINISHED_SECONDS = 10  # how long the "BINGO!" result stays on screen
 
 logging.basicConfig(
@@ -159,6 +170,61 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_round_players_round ON round_players(round_id);
         CREATE INDEX IF NOT EXISTS idx_deposit_reference ON deposit_requests(reference);
         """)
+        ucols = {r["name"] for r in con.execute("PRAGMA table_info(users)").fetchall()}
+        if "referred_by" not in ucols:
+            con.execute("ALTER TABLE users ADD COLUMN referred_by INTEGER")
+        if "referral_paid" not in ucols:
+            con.execute("ALTER TABLE users ADD COLUMN referral_paid REAL NOT NULL DEFAULT 0")
+        dcols = {r["name"] for r in con.execute("PRAGMA table_info(deposit_requests)").fetchall()}
+        for col, ddl in (("bonus", "REAL NOT NULL DEFAULT 0"), ("credited", "REAL NOT NULL DEFAULT 0"),
+                         ("approved_via", "TEXT NOT NULL DEFAULT ''")):
+            if col not in dcols:
+                con.execute("ALTER TABLE deposit_requests ADD COLUMN %s %s" % (col, ddl))
+        fresh_rules = con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='bonus_rules'").fetchone() is None
+        con.executescript("""
+        CREATE TABLE IF NOT EXISTS incoming_payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ref TEXT NOT NULL UNIQUE,
+            amount REAL NOT NULL,
+            sender TEXT NOT NULL DEFAULT '',
+            paid_at TEXT NOT NULL,
+            used_by_req INTEGER,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS bonus_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL DEFAULT '',
+            days TEXT NOT NULL DEFAULT '',
+            start_min INTEGER NOT NULL DEFAULT 0,
+            end_min INTEGER NOT NULL DEFAULT 1440,
+            percent REAL NOT NULL DEFAULT 0,
+            cap REAL NOT NULL DEFAULT 0,
+            active INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE TABLE IF NOT EXISTS promo_codes (
+            code TEXT PRIMARY KEY,
+            reward REAL NOT NULL DEFAULT 0,
+            max_uses INTEGER NOT NULL DEFAULT 0,
+            uses INTEGER NOT NULL DEFAULT 0,
+            expires_at TEXT,
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS promo_uses (
+            code TEXT NOT NULL,
+            user_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (code, user_id)
+        );
+        """)
+        if fresh_rules:
+            # Ethiopia time (UTC+3), standard clock. days: Monday=0 ... Sunday=6
+            con.executemany(
+                "INSERT INTO bonus_rules(name, days, start_min, end_min, percent, cap, active) VALUES(?,?,?,?,?,?,1)",
+                [("\u12a5\u1201\u12f5 100%", "6", 900, 1290, 100, 200),
+                 ("\u1301\u121b 50%", "4", 900, 1290, 50, 200),
+                 ("\u1260\u1218\u12a8\u1275\u120d 10%", "", 0, 1440, 10, 0)])
         con.commit()
 
 
@@ -280,15 +346,17 @@ def fresh_game():
 game_state = fresh_game()
 
 
-def generate_75_bingo_card(seed_val):
-    rng = random.Random(seed_val)
-    cols = [
-        rng.sample(range(1, 16), 5),
-        rng.sample(range(16, 31), 5),
-        rng.sample(range(31, 46), 5),
-        rng.sample(range(46, 61), 5),
-        rng.sample(range(61, 76), 5),
-    ]
+def generate_75_bingo_card(card_num):
+    """The grid depends ONLY on the card number (card #7 is the same for everybody, in every round).
+    A hash-driven shuffle is used instead of random.sample so it stays identical on every Python version."""
+    cols = []
+    for c in range(5):
+        pool = list(range(c * 15 + 1, c * 15 + 16))
+        h = hashlib.sha256(("besh-besh-card:%d:%d" % (int(card_num), c)).encode()).digest()
+        for i in range(14, 0, -1):
+            j = int.from_bytes(h[(i - 1) * 2:(i - 1) * 2 + 2], "big") % (i + 1)
+            pool[i], pool[j] = pool[j], pool[i]
+        cols.append(pool[:5])
     card = [[cols[c][r] for c in range(5)] for r in range(5)]
     card[2][2] = "FREE"
     return card
@@ -535,8 +603,12 @@ TEXT["en"].update({
 })
 
 
-TEXT["am"]["rules_msg"] = "\U0001f4dc \u1205\u130d\u1293 \u12f0\u1295\u1266\u127d\n\n1. \u1328\u12cb\u1273\u12cd \u1219\u1209 \u1260\u1219\u1209 \u12e8\u12d5\u12f5\u120d \u1290\u12cd\u1364 \u12a5\u12eb\u1295\u12f3\u1295\u12f1 \u12d9\u122d \u1208\u1265\u127b\u12cd \u1290\u12cd\u1362\n2. \u12e8\u12a0\u1295\u12f5 \u12ab\u122d\u12f5 \u12cb\u130b 10 \u1265\u122d \u1290\u12cd\u1362 \u12a81 \u12a5\u1235\u12a8 600 \u12ab\u122d\u12f5 \u1218\u121d\u1228\u1325 \u12ed\u127b\u120b\u120d (\u1262\u1260\u12db 4 \u12ab\u122d\u12f5)\u1364 \u12e8\u1218\u121d\u1228\u132b \u130a\u12dc 50 \u1230\u12a8\u1295\u12f5 \u1290\u12cd\u1362\n3. \u12a81 \u12a5\u1235\u12a8 75 \u12eb\u1209 \u1241\u1325\u122e\u127d \u12ed\u1320\u122b\u1209\u1362 \u12a0\u1295\u12f5 \u1228\u12f5\u134d\u1363 \u12a0\u1295\u12f5 \u12d3\u121d\u12f5\u1363 \u1230\u12eb\u134d \u12c8\u12ed\u121d \u12a0\u122b\u1271 \u1325\u130d \u1232\u121e\u120b \u1262\u1295\u130e \u1290\u12cd\u1362\n4. \u12eb\u1235\u1308\u1261\u1275 \u1265\u122d \u1270\u1218\u120b\u123d \u12a0\u12ed\u12f0\u1228\u130d\u121d\u1364 \u1208\u1328\u12cb\u1273 \u12ed\u12cd\u120b\u120d\u1362\n5. \u121b\u12cd\u1323\u1275 \u12e8\u121a\u127b\u1208\u12cd \u12a8\u12a0\u1238\u1293\u134a\u1290\u1275 (Win) \u1202\u1233\u1265 \u1265\u127b \u1290\u12cd\u1364 \u12dd\u1245\u1270\u129b\u12cd \u12e8\u121b\u12cd\u132b \u1218\u1320\u1295 100 \u1265\u122d \u1290\u12cd\u1362\n6. \u12a821 \u12d3\u1218\u1275 \u1260\u1273\u127d \u1208\u1206\u1291 \u12ad\u120d\u12ad\u120d \u1290\u12cd\u1362\n7. \u1328\u12cb\u1273\u12cd \u1208\u1218\u12dd\u1293\u129b \u1265\u127b \u1290\u12cd\u1364 \u12aa\u1235\u12ce\u1295 \u1260\u121b\u12ed\u130e\u12f3 \u1218\u1320\u1295 \u1265\u127b \u12ed\u132b\u12c8\u1271\u1362"
-TEXT["en"]["rules_msg"] = "\U0001f4dc Rules\n\n1. The game is purely a game of chance; every round stands on its own.\n2. A card costs 10 ETB. Pick cards from 1 to 600 (up to 4 cards); you have 50 seconds to choose.\n3. Numbers from 1 to 75 are called. A full row, column, diagonal or the four corners wins BINGO.\n4. Money you deposit is not refundable; it is used for playing.\n5. You can withdraw only from the Win wallet; the minimum withdrawal is 100 ETB.\n6. Not allowed for anyone under 21 years old.\n7. For entertainment only: play only with an amount that does not hurt your pocket."
+TEXT["am"]["rules_msg"] = "\U0001f4dc \u1205\u130d\u1293 \u12f0\u1295\u1266\u127d\n\n1. \u1328\u12cb\u1273\u12cd \u1219\u1209 \u1260\u1219\u1209 \u12e8\u12d5\u12f5\u120d \u1290\u12cd\u1364 \u12a5\u12eb\u1295\u12f3\u1295\u12f1 \u12d9\u122d \u1208\u1265\u127b\u12cd \u1290\u12cd\u1362\n2. \u12e8\u12a0\u1295\u12f5 \u12ab\u122d\u12f5 \u12cb\u130b 10 \u1265\u122d \u1290\u12cd\u1362 \u12a81 \u12a5\u1235\u12a8 600 \u12ab\u122d\u12f5 \u1218\u121d\u1228\u1325 \u12ed\u127b\u120b\u120d (\u1262\u1260\u12db 4 \u12ab\u122d\u12f5)\u1364 \u12e8\u1218\u121d\u1228\u132b \u130a\u12dc 50 \u1230\u12a8\u1295\u12f5 \u1290\u12cd\u1362\n3. \u12a81 \u12a5\u1235\u12a8 75 \u12eb\u1209 \u1241\u1325\u122e\u127d \u12ed\u1320\u122b\u1209\u1362 \u12a0\u1295\u12f5 \u1228\u12f5\u134d\u1363 \u12a0\u1295\u12f5 \u12d3\u121d\u12f5\u1363 \u1230\u12eb\u134d \u12c8\u12ed\u121d \u12a0\u122b\u1271 \u1325\u130d \u1232\u121e\u120b \u1262\u1295\u130e \u1290\u12cd\u1362\n4. \u12eb\u1235\u1308\u1261\u1275 \u1265\u122d \u1270\u1218\u120b\u123d \u12a0\u12ed\u12f0\u1228\u130d\u121d\u1364 \u1208\u1328\u12cb\u1273 \u12ed\u12cd\u120b\u120d\u1362 \u12dd\u1245\u1270\u129b\u12cd \u1308\u1295\u12d8\u1265 \u121b\u1235\u1308\u1262\u12eb 20 \u1265\u122d \u1290\u12cd\u1362\n5. \u121b\u12cd\u1323\u1275 \u12e8\u121a\u127b\u1208\u12cd \u12a8\u12a0\u1238\u1293\u134a\u1290\u1275 (Win) \u1202\u1233\u1265 \u1265\u127b \u1290\u12cd\u1364 \u12dd\u1245\u1270\u129b\u12cd \u12e8\u121b\u12cd\u132b \u1218\u1320\u1295 100 \u1265\u122d \u1290\u12cd\u1362\n6. \u12a821 \u12d3\u1218\u1275 \u1260\u1273\u127d \u1208\u1206\u1291 \u12ad\u120d\u12ad\u120d \u1290\u12cd\u1362\n7. \u1328\u12cb\u1273\u12cd \u1208\u1218\u12dd\u1293\u129b \u1265\u127b \u1290\u12cd\u1364 \u12aa\u1235\u12ce\u1295 \u1260\u121b\u12ed\u130e\u12f3 \u1218\u1320\u1295 \u1265\u127b \u12ed\u132b\u12c8\u1271\u1362"
+TEXT["en"]["rules_msg"] = "\U0001f4dc Rules\n\n1. The game is purely a game of chance; every round stands on its own.\n2. A card costs 10 ETB. Pick cards from 1 to 600 (up to 4 cards); you have 50 seconds to choose.\n3. Numbers from 1 to 75 are called. A full row, column, diagonal or the four corners wins BINGO.\n4. Money you deposit is not refundable; it is used for playing. The minimum deposit is 20 ETB.\n5. You can withdraw only from the Win wallet; the minimum withdrawal is 100 ETB.\n6. Not allowed for anyone under 21 years old.\n7. For entertainment only: play only with an amount that does not hurt your pocket."
+
+
+TEXT["am"].update({"promo": "\U0001f381 \u1355\u122e\u121e \u12ae\u12f5", "invite": "\U0001f517 \u130b\u1265\u12dd \u12a5\u1293 \u12a0\u130d\u129d"})
+TEXT["en"].update({"promo": "\U0001f381 Promo code", "invite": "\U0001f517 Invite & earn"})
 
 
 def tr(user_id, key, **kwargs):
@@ -554,6 +626,7 @@ def main_keyboard(user_id):
     rows += [
         [KeyboardButton(t["play"]), KeyboardButton(t["balance"])],
         [KeyboardButton(t["wallet"]), KeyboardButton(t["rank"])],
+        [KeyboardButton(t["promo"]), KeyboardButton(t["invite"])],
         [KeyboardButton(t["rules"]), KeyboardButton(t["language"])],
         [KeyboardButton(t["support"])],
     ]
@@ -574,7 +647,11 @@ def start_keyboard():
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    existed = get_user(user.id) is not None
     ensure_user(user.id, user.username, user.first_name)
+    args = getattr(context, "args", None) or []
+    if not existed and args and str(args[0]).startswith("ref_"):
+        set_referrer(user.id, str(args[0])[4:])   # only a brand-new account can be invited
     text = tr(user.id, "welcome") + "\n\n" + tr(user.id, "choose")
     markup = start_keyboard()
     if markup:
@@ -598,12 +675,131 @@ async def language_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text("\u124b\u1295\u124b \u12ed\u121d\u1228\u1321 / Choose language:", reply_markup=keyboard)
 
 
+MENU_KEYS = ("play", "balance", "rules", "wallet", "rank", "language", "support", "promo", "invite")
+LEGACY_MENU = ("\U0001f3ae Flash Bingo \u1328\u12cb\u1273", "\U0001f3ae Play Flash Bingo", "\U0001f4b0 \u1265\u122d \u1202\u1233\u1265", "\U0001f4dc \u1205\u130d \u12a5\u1293 \u12f0\u1295\u1266\u127d",
+               "\U0001f4b3 Wallet / \u12aa\u1235 \u1266\u122d\u1233", "\U0001f3c6 \u12f0\u1228\u1303", "\U0001f310 \u124b\u1295\u124b / Language", "\U0001f198 \u12f5\u130b\u134d")
+
+
+def is_menu_text(msg):
+    return msg in LEGACY_MENU or any(msg == lg.get(k) for lg in TEXT.values() for k in MENU_KEYS)
+
+
+def parse_amount(msg):
+    if not re.fullmatch(r"\s*[\d,]+(?:\.\d+)?\s*(?:\u1265\u122d|birr|etb)?\s*", msg or "", re.I):
+        return None
+    try:
+        v = float(re.sub(r"[^\d.]", "", msg.replace(",", "")))
+    except ValueError:
+        return None
+    return v if v > 0 else None
+
+
+def cancel_markup(uid):
+    return InlineKeyboardMarkup([[InlineKeyboardButton(L(uid, "\u274c \u1230\u122d\u12dd", "\u274c Cancel"), callback_data="w:cancel")]])
+
+
+def deposit_instructions(uid, amt):
+    bonus, pct = bonus_preview(amt)
+    lines = [L(uid, "\U0001f4e5 \u1308\u1295\u12d8\u1265 \u121b\u1235\u1308\u1263\u1275 (Telebirr)", "\U0001f4e5 Deposit (Telebirr)"), "",
+             "\U0001f4de " + L(uid, "\u1241\u1325\u122d", "Number") + ": " + PAY_NUMBER,
+             "\U0001f464 " + L(uid, "\u1235\u121d", "Name") + ": " + PAY_NAME,
+             "\U0001f4b0 " + L(uid, "\u1218\u1320\u1295", "Amount") + ": " + money(amt) + " ETB"]
+    if bonus > 0:
+        lines.append(L(uid, "\U0001f381 \u1266\u1290\u1235: +%s \u1265\u122d (%s%%) \u2014 \u12ad\u134d\u12eb\u12cd \u1260\u1270\u1228\u130b\u1308\u1320\u1260\u1275 \u1230\u12d3\u1275 \u12ed\u12c8\u1230\u1293\u120d" % (money(bonus), money(pct)),
+                       "\U0001f381 Bonus: +%s ETB (%s%%) \u2014 decided by the payment time" % (money(bonus), money(pct))))
+    lines += ["", L(uid,
+                     "1\ufe0f\u20e3 \u12a8\u120b\u12ed \u12c8\u12f3\u1208\u12cd \u1241\u1325\u122d %s \u1265\u122d \u1260 Telebirr \u12ed\u120b\u12a9\u1362\n"
+                     "2\ufe0f\u20e3 \u12a8\u12a8\u1348\u1209 \u1260\u128b\u120b \u12a8 Telebirr \u12e8\u12f0\u1228\u1230\u12ce\u1275\u1295 \u12e8 SMS \u133d\u1201\u134d \u1219\u1209 (\u12c8\u12ed\u121d \u12e8\u130d\u1265\u12ed\u1275 \u1241\u1325\u1229\u1295 - Transaction ID) \u12a5\u12da\u1205 \u12ed\u120b\u12a9\u1362\n\n"
+                     "\u12ad\u134d\u12eb\u12cd \u1232\u1228\u130b\u1308\u1325 \u12c8\u12f2\u12eb\u12cd\u1291 \u12c8\u12f0 \u1202\u1233\u1265\u12ce \u12ed\u1328\u1218\u122b\u120d\u1362" % money(amt),
+                     "1\ufe0f\u20e3 Send %s ETB to the number above with Telebirr.\n"
+                     "2\ufe0f\u20e3 After paying, send the full Telebirr SMS text (or just the Transaction ID) here.\n\n"
+                     "It is added to your balance as soon as the payment is confirmed." % money(amt))]
+    return "\n".join(lines)
+
+
+async def show_wallet(update, uid):
+    row = get_user(uid)
+    pct, cap = current_bonus()
+    text = L(uid, "\U0001f4b3 Wallet\n\nPlay: %s \u1265\u122d\nWin: %s \u1265\u122d" % (money(row["credits"]), money(row["win_credits"])),
+             "\U0001f4b3 Wallet\n\nPlay: %s ETB\nWin: %s ETB" % (money(row["credits"]), money(row["win_credits"])))
+    if pct > 0:
+        text += L(uid, "\n\n\U0001f381 \u12a0\u1201\u1295 \u12e8\u1308\u1295\u12d8\u1265 \u121b\u1235\u1308\u1262\u12eb \u1266\u1290\u1235: %s%%" % money(pct) + (" (\u12a5\u1235\u12a8 %s \u1265\u122d)" % money(cap) if cap else ""),
+                  "\n\n\U0001f381 Deposit bonus right now: %s%%" % money(pct) + (" (up to %s ETB)" % money(cap) if cap else ""))
+    text += L(uid, "\n\n\u1308\u1295\u12d8\u1265 \u1208\u121b\u1235\u1308\u1263\u1275 \u12a8\u1273\u127d \u12eb\u1208\u12cd\u1295 \u1241\u120d\u134d \u12ed\u132b\u1291\u1362 \u1208\u121b\u12cd\u1323\u1275 \u1260 Mini App \u12cd\u1235\u1325 Wallet \u2192 WITHDRAW \u12ed\u1320\u1240\u1219\u1362",
+              "\n\nTap the button below to deposit. To withdraw use Wallet \u2192 WITHDRAW inside the Mini App.")
+    rows = [[InlineKeyboardButton(L(uid, "\U0001f4e5 \u1308\u1295\u12d8\u1265 \u121b\u1235\u1308\u1263\u1275", "\U0001f4e5 Deposit"), callback_data="w:dep")]]
+    if PUBLIC_URL:
+        rows.append([InlineKeyboardButton(L(uid, "\U0001f4e4 \u1308\u1295\u12d8\u1265 \u121b\u12cd\u1323\u1275 (Mini App)", "\U0001f4e4 Withdraw (Mini App)"),
+                                          web_app=WebAppInfo(url=webapp_url()))])
+    await update.effective_message.reply_text(text, reply_markup=InlineKeyboardMarkup(rows))
+
+
+async def send_invite(update, context, uid):
+    try:
+        username = (await context.bot.get_me()).username
+    except Exception:
+        username = ""
+    if not username:
+        await update.effective_message.reply_text("Please try again in a moment.")
+        return
+    link = "https://t.me/%s?start=ref_%d" % (username, uid)
+    n, paid, earned = referral_stats(uid)
+    text = L(uid,
+             "\U0001f517 \u130b\u1265\u12dd \u12a5\u1293 \u12a0\u130d\u129d\n\n\u12e8\u12a5\u122d\u1235\u12ce \u1218\u130b\u1260\u12e3 \u120a\u1295\u12ad:\n%s\n\n\u1313\u12f0\u129b\u12ce \u1260\u12da\u1205 \u120a\u1295\u12ad \u1308\u1265\u1276 \u12e8\u1218\u1300\u1218\u122a\u12eb \u1308\u1295\u12d8\u1261\u1295 \u1232\u12eb\u1235\u1308\u1263 \u12a5\u1293 \u1232\u1338\u12f5\u1245 "
+             "%d \u1265\u122d \u12c8\u12f0 \u1202\u1233\u1265\u12ce \u12ed\u1328\u1218\u122b\u120d\u1362\n\n\U0001f465 \u12e8\u130b\u1260\u12df\u1278\u12cd: %d\n\u2705 \u1308\u1295\u12d8\u1265 \u12eb\u1235\u1308\u1261: %d\n\U0001f4b0 \u12eb\u1308\u1299\u1275: %s \u1265\u122d" % (link, REFERRAL_REWARD, n, paid, money(earned)),
+             "\U0001f517 Invite & earn\n\nYour invite link:\n%s\n\nWhen a friend joins with this link and his first deposit is approved, "
+             "%d ETB is added to your balance.\n\n\U0001f465 Invited: %d\n\u2705 Deposited: %d\n\U0001f4b0 Earned: %s ETB" % (link, REFERRAL_REWARD, n, paid, money(earned)))
+    share = "https://t.me/share/url?url=%s&text=%s" % (quote(link), quote(L(uid, "\u1260\u123d \u1260\u123d \u1262\u1295\u130e - \u1270\u132b\u12cd\u1270\u12cd \u12eb\u1238\u1295\u1349! \U0001f3b0", "Besh Besh Bingo - play and win! \U0001f3b0")))
+    await update.effective_message.reply_text(
+        text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(L(uid, "\U0001f4e4 \u1208\u1313\u12f0\u129b \u12a0\u130b\u122b", "\U0001f4e4 Share"), url=share)]]))
+
+
+async def handle_state_text(update, ud, user, msg):
+    uid, state = user.id, ud.get("state")
+    reply = update.effective_message.reply_text
+    loop = asyncio.get_running_loop()
+    if state == "dep_amount":
+        amt = parse_amount(msg)
+        if amt is None or amt < MIN_DEPOSIT:
+            await reply(L(uid, "\u26a0\ufe0f \u12a5\u1263\u12ad\u12ce \u1275\u12ad\u12ad\u1208\u129b \u1218\u1320\u1295 (\u1241\u1325\u122d \u1265\u127b) \u12ed\u120b\u12a9\u1362 \u12dd\u1245\u1270\u129b\u12cd %d \u1265\u122d \u1290\u12cd\u1362" % MIN_DEPOSIT,
+                          "\u26a0\ufe0f Please send a valid amount (numbers only). The minimum is %d ETB." % MIN_DEPOSIT),
+                        reply_markup=cancel_markup(uid))
+            return
+        ud["dep_amount"], ud["state"] = amt, "dep_ref"
+        await reply(deposit_instructions(uid, amt), reply_markup=cancel_markup(uid))
+    elif state == "dep_ref":
+        ref, err = extract_reference(msg)
+        if err:
+            await reply(err, reply_markup=cancel_markup(uid))
+            return
+        status, message = await loop.run_in_executor(None, submit_deposit, uid, ud.get("dep_amount") or MIN_DEPOSIT, ref)
+        if status in ("approved", "pending"):
+            ud.pop("state", None)
+            ud.pop("dep_amount", None)
+        if status != "approved":   # an approved deposit already sends its own confirmation
+            await reply(message, reply_markup=(cancel_markup(uid) if status == "error" else None))
+    elif state == "promo":
+        ud.pop("state", None)
+        result, reward = await loop.run_in_executor(None, redeem_promo, uid, msg)
+        await reply(promo_message(uid, result, reward))
+
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     ensure_user(user.id, user.username, user.first_name)
     msg = (update.effective_message.text or "").strip()
     lang = get_language(user.id)
     t = TEXT.get(lang, TEXT["am"])
+    ud = getattr(context, "user_data", None)
+    if ud is None:
+        ud = {}
+    menu = is_menu_text(msg)
+    if menu:   # pressing any menu button cancels a half-finished deposit / promo entry
+        ud.pop("state", None)
+        ud.pop("dep_amount", None)
+    elif ud.get("state"):
+        await handle_state_text(update, ud, user, msg)
+        return
 
     if msg in (t["play"], "\U0001f3ae \u1260\u123d \u1260\u123d \u1262\u1295\u130e \u1328\u12cb\u1273", "\U0001f3ae Play Besh Besh Bingo",
                "\U0001f3ae Flash Bingo \u1328\u12cb\u1273", "\U0001f3ae Play Flash Bingo"):
@@ -616,12 +812,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         row = get_user(user.id)
         await update.effective_message.reply_text(
             tr(user.id, "balance_msg", credits=row["credits"], win_credits=row["win_credits"]))
-    elif msg in (t["rules"], "\U0001f4dc \u1215\u130d \u12a5\u1293 \u12f0\u1295\u1266\u127d", "\U0001f4dc Rules"):
+    elif msg in (t["rules"], "\U0001f4dc \u1205\u130d \u12a5\u1293 \u12f0\u1295\u1266\u127d", "\U0001f4dc Rules"):
         await update.effective_message.reply_text(tr(user.id, "rules_msg"))
     elif msg in (t["wallet"], "\U0001f4b3 Wallet / \u12aa\u1235 \u1266\u122d\u1233", "\U0001f4b3 Wallet"):
+        await show_wallet(update, user.id)
+    elif msg == t["promo"]:
+        ud["state"] = "promo"
         await update.effective_message.reply_text(
-            "\U0001f4b3 Wallet\nTelebirr: 0918719332 \u00b7 Enyew\nCBE Birr: 0918719332 \u00b7 Enyew\n\n"
-            "\u12ad\u134d\u12eb\u12cd\u1295 \u12a8\u1348\u1338\u1219 \u1260\u128b\u120b \u1260 Mini App \u12cd\u1235\u1325 \u12e8\u130d\u1265\u12ed\u1275 \u1241\u1325\u1229\u1295 (Transaction ID) \u12ed\u120b\u12a9\u1362")
+            L(user.id, "\U0001f381 \u12e8\u1355\u122e\u121e \u12ae\u12f1\u1295 \u12ed\u120b\u12a9\u1362", "\U0001f381 Send your promo code."), reply_markup=cancel_markup(user.id))
+    elif msg == t["invite"]:
+        await send_invite(update, context, user.id)
     elif msg in (t["rank"], "\U0001f3c6 \u12f0\u1228\u1303", "\U0001f3c6 Rank"):
         with closing(db()) as con:
             rows = con.execute(
@@ -638,6 +838,75 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("\U0001f198 \u12f5\u130b\u134d / Help\n\u1208\u12a5\u122d\u12f3\u1273 \u12a0\u1235\u1270\u12f3\u12f3\u122a\u12cd\u1295 \u12eb\u1290\u130b\u130d\u1229\u1362\nContact the administrator for support.")
     else:
         await update.effective_message.reply_text(tr(user.id, "choose"), reply_markup=main_keyboard(user.id))
+
+
+# ---------------- /announce (admin only, preview + confirm) ----------------
+pending_announce = {}   # admin_id -> {"text", "audience", "ids"}
+_bg_tasks = set()
+
+
+async def announce_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id not in ADMIN_IDS:
+        await update.effective_message.reply_text("\U0001f6ab Unauthorized.")
+        return
+    raw = update.effective_message.text or ""
+    cmd = raw.split(None, 1)[0].split("@")[0].lower() if raw.strip() else "/announce"
+    parts = raw.split(None, 1)
+    body = parts[1].strip() if len(parts) > 1 else ""
+    audience = "players" if cmd.startswith("/announce_players") else "all"
+    if not body:
+        await update.effective_message.reply_text(
+            "\U0001f4e3 \u12a0\u1320\u1243\u1240\u121d:\n/announce \u1218\u120d\u12d5\u12ad\u1275 \u2014 \u1208\u1201\u1209\u121d \u1270\u1320\u1243\u121a\u12ce\u127d\n/announce_players \u1218\u120d\u12d5\u12ad\u1275 \u2014 \u12a8\u12da\u1205 \u1260\u134a\u1275 \u1208\u1270\u132b\u12c8\u1271\u1275 \u1265\u127b")
+        return
+    ids = announce_recipients(audience)
+    pending_announce[user.id] = {"text": body, "audience": audience, "ids": ids}
+    await update.effective_message.reply_text(
+        "\U0001f4e3 \u1245\u12f5\u1218 \u12a5\u12ed\u1273 (%s \u1230\u12ce\u127d \u12ed\u12f0\u122d\u1233\u1278\u12cb\u120d):\n\n%s" % (len(ids), body),
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("\u2705 \u120b\u12ad", callback_data="ann:send"),
+            InlineKeyboardButton("\u274c \u1230\u122d\u12dd", callback_data="ann:cancel")]]))
+
+
+async def run_announce(bot, admin_id, text, ids):
+    sent = failed = 0
+    for uid in ids:
+        for attempt in (1, 2):
+            try:
+                await bot.send_message(chat_id=uid, text=text)
+                sent += 1
+                break
+            except Exception as e:
+                wait = getattr(e, "retry_after", None)
+                if wait and attempt == 1:
+                    await asyncio.sleep(float(wait) + 1)
+                    continue
+                failed += 1
+                break
+        await asyncio.sleep(0.05)   # stay below Telegram's ~30 messages per second
+    try:
+        await bot.send_message(chat_id=admin_id, text="\U0001f4e3 \u121b\u1235\u1273\u12c8\u1242\u12eb \u1270\u1320\u1293\u1240\u1240\u1362\n\u2705 \u12f0\u122d\u1237\u120d: %d\n\u26a0\ufe0f \u12a0\u120d\u12f0\u1228\u1230\u121d: %d" % (sent, failed))
+    except Exception:
+        logger.exception("could not send the announcement report")
+
+
+async def handle_announce_button(query, context, data, admin_id):
+    job = pending_announce.pop(admin_id, None)
+    if data == "ann:cancel" or job is None:
+        await query.answer("\u1270\u1230\u122d\u12df\u120d" if job else "\u121d\u1295\u121d \u12e8\u121a\u1320\u1265\u1245 \u121b\u1235\u1273\u12c8\u1242\u12eb \u12e8\u1208\u121d", show_alert=job is None)
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        return
+    await query.answer("\u12a5\u12e8\u1270\u120b\u12a8 \u1290\u12cd...")
+    try:
+        await query.edit_message_text((query.message.text or "") + "\n\n\u23f3 \u12a5\u12e8\u1270\u120b\u12a8 \u1290\u12cd...")
+    except Exception:
+        pass
+    task = asyncio.create_task(run_announce(context.bot, admin_id, job["text"], job["ids"]))
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
 
 
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -722,6 +991,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data or ""
     user_id = query.from_user.id
+    if data.startswith("ann:"):
+        if user_id not in ADMIN_IDS:
+            await query.answer("\U0001f6ab Unauthorized", show_alert=True)
+            return
+        await handle_announce_button(query, context, data, user_id)
+        return
     if data.startswith(("dep:", "wd:")):
         # buttons also work inside a group, so only real admins may press them
         if user_id not in ADMIN_IDS:
@@ -731,6 +1006,24 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await query.answer()
     ensure_user(user_id, query.from_user.username, query.from_user.first_name)
+    if data.startswith("w:"):
+        ud = context.user_data
+        if data == "w:dep":
+            ud["state"] = "dep_amount"
+            ud.pop("dep_amount", None)
+            await query.message.reply_text(
+                L(user_id, "\U0001f4b0 \u1235\u1295\u1275 \u1265\u122d \u121b\u1235\u1308\u1263\u1275 \u12ed\u1348\u120d\u130b\u1209?\n\n\u12dd\u1245\u1270\u129b\u12cd %d \u1265\u122d \u1290\u12cd\u1362 \u1241\u1325\u122d \u1265\u127b \u12ed\u120b\u12a9 (\u1208\u121d\u1233\u120c 100)\u1362" % MIN_DEPOSIT,
+                  "\U0001f4b0 How much do you want to deposit?\n\nThe minimum is %d ETB. Send the number only (e.g. 100)." % MIN_DEPOSIT),
+                reply_markup=cancel_markup(user_id))
+        elif data == "w:cancel":
+            ud.pop("state", None)
+            ud.pop("dep_amount", None)
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            await query.message.reply_text(L(user_id, "\u1270\u1230\u122d\u12df\u120d\u1362", "Cancelled."))
+        return
     if data.startswith("lang:"):
         lang = data.split(":", 1)[1]
         if lang in ("am", "en"):
@@ -744,6 +1037,8 @@ bot_application.add_handler(MessageHandler(filters.CONTACT, handle_contact))
 bot_application.add_handler(CommandHandler("language", language_command))
 bot_application.add_handler(CommandHandler("id", id_command))
 bot_application.add_handler(CommandHandler("admin", admin_command))
+bot_application.add_handler(CommandHandler("announce", announce_command))
+bot_application.add_handler(CommandHandler("announce_players", announce_command))
 bot_application.add_handler(CallbackQueryHandler(callback_handler))
 bot_application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
@@ -840,7 +1135,154 @@ def money(x):
     return ("%.2f" % float(x)).rstrip("0").rstrip(".")
 
 
-def notify_deposit(req_id, uid, method, amount, ref):
+def notify_withdraw(req_id, uid, account_info, amount):
+    text = ("\U0001f4e4 \u12a0\u12f2\u1235 \u12e8\u121b\u12cd\u1323\u1275 \u1325\u12eb\u1244 #%d\n\n"
+            "\u1270\u132b\u12cb\u127d: %s (ID %s)\n\u1218\u1320\u1295: %s \u1265\u122d\n\u12e8\u12a0\u12ab\u12cd\u1295\u1275 \u1218\u1228\u1303: %s\n\n"
+            "\u1265\u1229\u1295 \u12a8\u120b\u12ad\u1205 \u1260\u128b\u120b \u00ab\u1270\u12a8\u134d\u120f\u120d\u00bb \u1295 \u1270\u132b\u1295\u1362 \u12cd\u12f5\u1245 \u12ab\u12f0\u1228\u130d\u1205 \u1265\u1229 \u12c8\u12f0 \u1270\u132b\u12cb\u1279 \u12ed\u1218\u1208\u1233\u120d\u1362"
+            % (req_id, display_name(uid), uid, money(amount), account_info))
+    markup = InlineKeyboardMarkup([[
+        InlineKeyboardButton("\u2705 \u1270\u12a8\u134d\u120f\u120d", callback_data="wd:paid:%d" % req_id),
+        InlineKeyboardButton("\u274c \u12cd\u12f5\u1245 (\u1265\u1229\u1295 \u1218\u120d\u1235)", callback_data="wd:reject:%d" % req_id),
+    ]])
+    notify_admins(text, markup)
+
+
+def L(uid, am, en):
+    return en if get_language(uid) == "en" else am
+
+
+def utc_now():
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def fmt_db(dt):
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def parse_db_time(s):
+    try:
+        return datetime.strptime(str(s)[:19], "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return utc_now()
+
+
+def eth_clock(minute):
+    """Ethiopian clock text for minutes-after-midnight on the standard clock (15:00 -> \u12a8\u1240\u1291 9 \u1230\u12d3\u1275)."""
+    h, m = (int(minute) // 60) % 24, int(minute) % 60
+    eh = (h - 6) % 12
+    if eh == 0:
+        eh = 12
+    period = "\u1320\u12cb\u1275" if 6 <= h < 12 else ("\u12a8\u1240\u1291" if 12 <= h < 18 else ("\u121d\u123d\u1275" if h >= 18 else "\u120c\u120a\u1275"))
+    return "%s %d%s \u1230\u12d3\u1275" % (period, eh, (":%02d" % m) if m else "")
+
+
+# ---------------- deposit bonus (rules are editable in the admin panel) ----------------
+def matching_rules(con, when_utc):
+    """Active bonus rules that apply at this moment (Ethiopia time = UTC+3)."""
+    local = when_utc + timedelta(hours=3)
+    minute, weekday = local.hour * 60 + local.minute, local.weekday()
+    out = []
+    for r in con.execute("SELECT * FROM bonus_rules WHERE active=1").fetchall():
+        days = [int(x) for x in (r["days"] or "").split(",") if x.strip().isdigit()]
+        if days and weekday not in days:
+            continue
+        if r["start_min"] <= minute < r["end_min"]:
+            out.append(r)
+    return out
+
+
+def bonus_for(con, amount, when_utc):
+    """(bonus, percent): only the HIGHEST applicable percentage is used; the cap of that rule limits the bonus."""
+    best_b, best_p = 0.0, 0.0
+    for r in matching_rules(con, when_utc):
+        b = float(amount) * r["percent"] / 100.0
+        if r["cap"] and r["cap"] > 0:
+            b = min(b, r["cap"])
+        b = round(b + 1e-9, 2)
+        if r["percent"] > best_p or (r["percent"] == best_p and b > best_b):
+            best_b, best_p = b, r["percent"]
+    return best_b, best_p
+
+
+def current_bonus():
+    """(percent, cap) of the best rule right now (for banners)."""
+    with closing(db()) as con:
+        best = (0.0, 0.0)
+        for r in matching_rules(con, utc_now()):
+            if r["percent"] > best[0]:
+                best = (r["percent"], r["cap"])
+        return best
+
+
+def bonus_info():
+    pct, cap = current_bonus()
+    return {"bonus_percent": pct, "bonus_cap": cap, "pay_number": PAY_NUMBER, "pay_name": PAY_NAME,
+            "min_deposit": MIN_DEPOSIT}
+
+
+def bonus_preview(amount):
+    with closing(db()) as con:
+        return bonus_for(con, amount, utc_now())
+
+
+# ---------------- reading a Telebirr SMS ----------------
+def parse_telebirr_sms(text):
+    """Returns a dict for an INCOMING-money SMS (\u1270\u1240\u1265\u1208\u12cb\u120d / received), otherwise None."""
+    t = text or ""
+    if not ("\u1270\u1240\u1265\u1208\u12cb\u120d" in t or re.search(r"\breceived\b", t, re.I)):
+        return None
+    m = re.search(r"\u1241\u1325\u122d\u12ce\s*([A-Za-z0-9]{8,14})", t) or re.search(r"/receipt/([A-Za-z0-9]{8,14})", t)
+    if not m:
+        return None
+    a = re.search(r"([\d,]+(?:\.\d+)?)\s*(?:\u1265\u122d|ETB|Birr)", t, re.I)
+    if not a:
+        return None
+    try:
+        amount = float(a.group(1).replace(",", ""))
+    except ValueError:
+        return None
+    if amount <= 0:
+        return None
+    paid_at = utc_now()
+    d = re.search(r"(\d{1,2})/(\d{1,2})/(\d{4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?", t)
+    if d:
+        try:
+            local = datetime(int(d.group(3)), int(d.group(2)), int(d.group(1)),
+                             int(d.group(4)), int(d.group(5)), int(d.group(6) or 0))
+            utc = local - timedelta(hours=3)
+            if abs((utc - paid_at).total_seconds()) < 2 * 86400:   # sanity: ignore absurd dates
+                paid_at = utc
+        except ValueError:
+            pass
+    sender_tail = ""
+    s = re.search(r"\(([0-9*+]{6,16})\)", t)
+    if s:
+        sender_tail = re.sub(r"\D", "", s.group(1))[-4:]
+    return {"ref": m.group(1).upper(), "amount": amount, "paid_at": paid_at, "sender_tail": sender_tail}
+
+
+def extract_reference(text):
+    """Transaction ID from what the player typed or pasted (whole SMS, receipt link or the bare ID).
+    Returns (ref, error_message_or_None)."""
+    t = str(text or "").strip()
+    if not t:
+        return "", "\u12a5\u1263\u12ad\u12ce \u12e8\u130d\u1265\u12ed\u1275 \u1241\u1325\u1229\u1295 \u12c8\u12ed\u121d \u12e8 SMS \u133d\u1201\u1349\u1295 \u12ed\u120b\u12a9\u1362"
+    m = re.search(r"\u1241\u1325\u122d\u12ce\s*([A-Za-z0-9]{8,14})", t)
+    if m and "\u120d\u12a8\u12cb\u120d" in t:
+        # a SENT-money SMS: the masked number in brackets is the receiver - it must be the owner's number
+        r = re.search(r"\(([0-9*+]{6,16})\)", t)
+        if r and re.sub(r"\D", "", r.group(1))[-4:] != PAY_TAIL:
+            return "", "\u12ed\u1205 \u12ad\u134d\u12eb \u12c8\u12f0 %s \u12e8\u1270\u120b\u12a8 \u12a0\u12ed\u1218\u1235\u120d\u121d\u1362 \u12a5\u1263\u12ad\u12ce \u12c8\u12f0 \u1275\u12ad\u12ad\u1208\u129b\u12cd \u1241\u1325\u122d \u12ed\u12ad\u1348\u1209\u1362" % PAY_NUMBER
+    if not m:
+        m = re.search(r"/receipt/([A-Za-z0-9]{8,14})", t)
+    ref = m.group(1).upper() if m else clean_reference(t)
+    problem = reference_problem(ref)
+    if problem:
+        return "", problem
+    return ref, None
+
+
+def notify_deposit(req_id, uid, method, amount, ref, note=None):
     phone = get_phone(uid)
     when = time.strftime("%Y-%m-%d %H:%M", time.gmtime(time.time() + 3 * 3600))  # Ethiopia time
     lines = [
@@ -856,52 +1298,248 @@ def notify_deposit(req_id, uid, method, amount, ref):
         "Transaction ID: %s" % ref,
         "\u1230\u12d3\u1275: %s" % when,
         "",
-        "\u2705 \u12a8\u121b\u133d\u12f0\u1245\u1205 \u1260\u134a\u1275 \u12a0\u1228\u130b\u130d\u1325:",
-        "1. \u1241\u1325\u1229 \u1260\u122b\u1235\u1205 \u12e8\u1274\u120c\u1265\u122d/CBE \u1273\u122a\u12ad \u12c8\u12ed\u121d SMS \u12cd\u1235\u1325 \u12a0\u1208",
-        "2. \u1218\u1320\u1291 \u1260\u1275\u12ad\u12ad\u120d \u12ed\u1218\u1233\u1230\u120b\u120d",
-        "3. \u1308\u1295\u12d8\u1261 \u12c8\u12f0 \u12a0\u1295\u1270 \u12a0\u12ab\u12cd\u1295\u1275 \u1308\u1265\u1277\u120d",
-        "4. \u1201\u1294\u1273\u12cd \u00ab\u1270\u1233\u12ad\u1277\u120d\u00bb \u1290\u12cd (\u1260\u1218\u1320\u1263\u1260\u1245 \u120b\u12ed \u12a0\u12ed\u12f0\u1208\u121d)",
-        "5. \u1230\u12d3\u1271 \u12a8\u1325\u12eb\u1244\u12cd \u130b\u122d \u12ed\u1235\u121b\u121b\u120d",
-        "6. \u1241\u1325\u1229 \u12a8\u12da\u1205 \u1260\u134a\u1275 \u1260\u120c\u120b \u12f2\u1356\u12da\u1275 \u120b\u12ed \u12a0\u120d\u12cb\u1208\u121d",
+        note or "\u26a0\ufe0f \u12a8 SMS \u130b\u122d \u12a0\u120d\u1270\u1323\u1218\u1228\u121d (\u1235\u120d\u12ad\u1205 \u120b\u12ed \u1308\u1293 \u12a0\u120d\u12f0\u1228\u1230 \u12ed\u1206\u1293\u120d)\u1362 \u12f0\u1228\u1230\u1299\u1295 \u12a0\u1228\u130b\u130d\u1325\u1362",
         "",
-        "\u26a0\ufe0f \u1235\u12ad\u122a\u1295\u123e\u1275 \u1265\u127b \u121b\u1235\u1228\u1303 \u12a0\u12ed\u12f0\u1208\u121d\u1362 \u12a0\u1320\u122b\u1323\u122a \u12a8\u1206\u1290 \u121d\u1295\u121d \u12a0\u1275\u132b\u1295\u1364 \u1325\u12eb\u1244\u12cd \u1260\u1218\u1320\u1263\u1260\u1245 \u120b\u12ed \u12ed\u1246\u12eb\u120d\u1362",
+        "\u2705 \u12a8\u121b\u133d\u12f0\u1245\u1205 \u1260\u134a\u1275 \u12a0\u1228\u130b\u130d\u1325:",
+        "1. \u1241\u1325\u1229 \u1260\u122b\u1235\u1205 \u12e8\u1274\u120c\u1265\u122d \u1273\u122a\u12ad/SMS \u12cd\u1235\u1325 \u12a0\u1208",
+        "2. \u1218\u1320\u1291 \u1260\u1275\u12ad\u12ad\u120d \u12ed\u1218\u1233\u1230\u120b\u120d (\u12e8\u12f0\u1228\u1230\u12cd \u1265\u122d \u1290\u12cd \u12e8\u121a\u1328\u1218\u1228\u12cd)",
+        "3. \u1201\u1294\u1273\u12cd \u00ab\u1270\u1233\u12ad\u1277\u120d\u00bb \u1290\u12cd",
+        "4. \u1241\u1325\u1229 \u12a8\u12da\u1205 \u1260\u134a\u1275 \u1260\u120c\u120b \u12f2\u1356\u12da\u1275 \u120b\u12ed \u12a0\u120d\u12cb\u1208\u121d",
+        "",
+        "\u26a0\ufe0f \u1235\u12ad\u122a\u1295\u123e\u1275 \u1265\u127b \u121b\u1235\u1228\u1303 \u12a0\u12ed\u12f0\u1208\u121d\u1362 \u12a0\u1320\u122b\u1323\u122a \u12a8\u1206\u1290 \u121d\u1295\u121d \u12a0\u1275\u132b\u1295\u1362",
     ]
-    text = "\n".join(lines)
-    markup = InlineKeyboardMarkup([[
+    rows = []
+    if re.fullmatch(r"[A-Z0-9]{8,14}", ref or ""):
+        rows.append([InlineKeyboardButton("\U0001f517 \u12f0\u1228\u1230\u129d \u12ad\u1348\u1275", url=RECEIPT_URL + ref)])
+    rows.append([
         InlineKeyboardButton("\u2705 \u12a0\u133d\u12f5\u1245", callback_data="dep:approve:%d" % req_id),
         InlineKeyboardButton("\u274c \u12cd\u12f5\u1245 \u12a0\u12f5\u122d\u130d", callback_data="dep:reject:%d" % req_id),
-    ]])
-    notify_admins(text, markup)
+    ])
+    notify_admins("\n".join(lines), InlineKeyboardMarkup(rows))
 
 
-def notify_withdraw(req_id, uid, account_info, amount):
-    text = ("\U0001f4e4 \u12a0\u12f2\u1235 \u12e8\u121b\u12cd\u1323\u1275 \u1325\u12eb\u1244 #%d\n\n"
-            "\u1270\u132b\u12cb\u127d: %s (ID %s)\n\u1218\u1320\u1295: %s \u1265\u122d\n\u12e8\u12a0\u12ab\u12cd\u1295\u1275 \u1218\u1228\u1303: %s\n\n"
-            "\u1265\u1229\u1295 \u12a8\u120b\u12ad\u1205 \u1260\u128b\u120b \u00ab\u1270\u12a8\u134d\u120f\u120d\u00bb \u1295 \u1270\u132b\u1295\u1362 \u12cd\u12f5\u1245 \u12ab\u12f0\u1228\u130d\u1205 \u1265\u1229 \u12c8\u12f0 \u1270\u132b\u12cb\u1279 \u12ed\u1218\u1208\u1233\u120d\u1362"
-            % (req_id, display_name(uid), uid, money(amount), account_info))
-    markup = InlineKeyboardMarkup([[
-        InlineKeyboardButton("\u2705 \u1270\u12a8\u134d\u120f\u120d", callback_data="wd:paid:%d" % req_id),
-        InlineKeyboardButton("\u274c \u12cd\u12f5\u1245 (\u1265\u1229\u1295 \u1218\u120d\u1235)", callback_data="wd:reject:%d" % req_id),
-    ]])
-    notify_admins(text, markup)
+def approve_deposit(req_id, reviewer_id, via="admin", amount=None, paid_at=None):
+    """Approve a pending deposit exactly once and credit it: the amount that REALLY arrived (when known from
+    the SMS) + the bonus for the payment time (both to the Play wallet) + the one-time referral reward.
+    Returns a dict, or None when the request was not pending."""
+    inviter, ref_reward = None, 0.0
+    with closing(db()) as con:
+        con.execute("BEGIN IMMEDIATE")
+        row = con.execute("SELECT * FROM deposit_requests WHERE id=? AND status='pending'", (req_id,)).fetchone()
+        if row is None:
+            con.rollback()
+            return None
+        uid = row["user_id"]
+        ref = (row["reference"] or "").replace(" ", "").upper()
+        inc = con.execute("SELECT * FROM incoming_payments WHERE ref=?", (ref,)).fetchone()
+        inc_free = inc is not None and not inc["used_by_req"]
+        if amount is None and inc_free:
+            amount, paid_at = inc["amount"], parse_db_time(inc["paid_at"])
+        amt = float(amount) if amount else float(row["amount"])
+        when = paid_at or utc_now()
+        bonus, pct = bonus_for(con, amt, when)
+        con.execute(
+            "UPDATE deposit_requests SET status='approved', reviewed_at=CURRENT_TIMESTAMP, reviewed_by=?, "
+            "amount=?, bonus=?, credited=?, approved_via=? WHERE id=?",
+            (int(reviewer_id), amt, bonus, amt + bonus, via, req_id))
+        con.execute("UPDATE users SET credits=credits+? WHERE user_id=?", (amt + bonus, uid))
+        if inc_free:
+            con.execute("UPDATE incoming_payments SET used_by_req=? WHERE ref=?", (req_id, ref))
+        u = con.execute("SELECT referred_by, referral_paid FROM users WHERE user_id=?", (uid,)).fetchone()
+        if u and u["referred_by"] and not u["referral_paid"]:
+            earlier = con.execute(
+                "SELECT COUNT(*) FROM deposit_requests WHERE user_id=? AND status='approved' AND id!=?",
+                (uid, req_id)).fetchone()[0]
+            exists = con.execute("SELECT 1 FROM users WHERE user_id=?", (u["referred_by"],)).fetchone()
+            if earlier == 0 and exists:
+                inviter, ref_reward = int(u["referred_by"]), float(REFERRAL_REWARD)
+                con.execute("UPDATE users SET credits=credits+? WHERE user_id=?", (ref_reward, inviter))
+                con.execute("UPDATE users SET referral_paid=? WHERE user_id=?", (ref_reward, uid))
+        con.commit()
+    typed = float(row["amount"])
+    msg = L(uid, "\u2705 %s \u1265\u122d \u12c8\u12f0 \u1202\u1233\u1265\u12ce \u1270\u1328\u121d\u122f\u120d\u1362 \u1218\u120d\u12ab\u121d \u1328\u12cb\u1273!" % money(amt),
+            "\u2705 %s ETB was added to your balance. Good luck!" % money(amt))
+    if bonus > 0:
+        msg += L(uid, "\n\U0001f381 \u1266\u1290\u1235: +%s \u1265\u122d (%s%%) \u12c8\u12f0 \u1218\u132b\u12c8\u127b \u1202\u1233\u1265\u12ce \u1270\u1328\u121d\u122f\u120d\u1362" % (money(bonus), money(pct)),
+                 "\n\U0001f381 Bonus: +%s ETB (%s%%) added to your Play wallet." % (money(bonus), money(pct)))
+    send_to_chat(uid, msg)
+    if inviter:
+        send_to_chat(inviter, L(inviter,
+                                "\U0001f389 \u12eb\u1235\u130b\u1260\u12d9\u1275 \u1230\u12cd \u12e8\u1218\u1300\u1218\u122a\u12eb \u1308\u1295\u12d8\u1265 \u12a0\u1235\u1308\u1265\u1277\u120d! %s \u1265\u122d \u123d\u120d\u121b\u1275 \u12c8\u12f0 \u1202\u1233\u1265\u12ce \u1270\u1328\u121d\u122f\u120d\u1362" % money(ref_reward),
+                                "\U0001f389 Someone you invited made a first deposit! %s ETB reward was added to your balance." % money(ref_reward)))
+    if via == "sms":
+        text = ("\u2705 \u122b\u1235-\u1230\u122d \u1270\u1228\u130b\u130d\u1327\u120d #%d\n\u1270\u132b\u12cb\u127d: %s (ID %s)\n\u1218\u1320\u1295: %s \u1265\u122d" % (req_id, display_name(uid), uid, money(amt)))
+        if bonus > 0:
+            text += " (+%s \u1266\u1290\u1235, %s%%)" % (money(bonus), money(pct))
+        text += "\nTransaction ID: %s" % ref
+        if abs(typed - amt) > 0.004:
+            text += "\n\u26a0\ufe0f \u1270\u132b\u12cb\u1279 \u12e8\u133b\u1348\u12cd %s \u1265\u122d \u1290\u1260\u122d\u1364 \u1260\u12a5\u12cd\u1290\u1275 \u12e8\u12f0\u1228\u1230\u12cd %s \u1265\u122d \u1270\u1328\u121d\u122f\u120d\u1362" % (money(typed), money(amt))
+        notify_admins(text)
+    return {"id": req_id, "user_id": uid, "typed": typed, "amount": amt, "bonus": bonus, "percent": pct,
+            "via": via, "inviter": inviter, "referral_reward": ref_reward}
+
+
+def auto_approve(req, amount, paid_at, sender_tail):
+    """The SMS for this pending request has arrived. Approve automatically unless something looks off,
+    in which case the admin gets the normal approve/reject message with the reason."""
+    uid = req["user_id"]
+    phone = get_phone(uid)
+    note = None
+    if amount < MIN_DEPOSIT:
+        note = "\u26a0\ufe0f \u12ad\u134d\u12eb\u12cd \u1260 SMS \u12f0\u122d\u1237\u120d (%s \u1265\u122d) \u130d\u1295 \u12a8\u12dd\u1245\u1270\u129b\u12cd (%d \u1265\u122d) \u12eb\u1295\u1233\u120d\u1362 \u1260\u12a5\u1305 \u12c8\u1235\u1295\u1362" % (money(amount), MIN_DEPOSIT)
+    elif sender_tail and phone and phone[-4:] != sender_tail:
+        note = ("\u26a0\ufe0f \u12ad\u134d\u12eb\u12cd \u1260 SMS \u12f0\u122d\u1237\u120d (%s \u1265\u122d) \u130d\u1295 \u120b\u12aa\u12cd (\u2026%s) \u12a8\u1270\u132b\u12cb\u1279 \u12a8\u1270\u1218\u12d8\u1308\u1260\u12cd \u1235\u120d\u12ad (\u2026%s) \u130b\u122d \u12a0\u12ed\u1218\u1233\u1230\u120d\u121d\u1362 "
+                "\u1260\u12a5\u1305 \u12a0\u1228\u130b\u130d\u1325\u1362" % (money(amount), sender_tail, phone[-4:]))
+    if note:
+        notify_deposit(req["id"], uid, req["method"], req["amount"], req["reference"], note)
+        return "manual"
+    return "approved" if approve_deposit(req["id"], 0, "sms", amount, paid_at) else "gone"
+
+
+def handle_incoming_sms(p):
+    """A Telebirr 'received' SMS came from the owner's phone. Remember it and match it to a pending request."""
+    ref = p["ref"]
+    with closing(db()) as con:
+        con.execute("BEGIN IMMEDIATE")
+        if con.execute("SELECT 1 FROM incoming_payments WHERE ref=?", (ref,)).fetchone():
+            con.rollback()
+            return "duplicate"
+        con.execute("INSERT INTO incoming_payments(ref, amount, sender, paid_at) VALUES(?,?,?,?)",
+                    (ref, p["amount"], p.get("sender_tail") or "", fmt_db(p["paid_at"])))
+        req = con.execute(
+            "SELECT * FROM deposit_requests WHERE UPPER(REPLACE(reference,' ',''))=? AND status='pending' "
+            "ORDER BY id LIMIT 1", (ref,)).fetchone()
+        con.commit()
+    if req is None:
+        return "stored"   # the player has not sent his request yet; it is approved the moment he does
+    return auto_approve(req, p["amount"], p["paid_at"], p.get("sender_tail"))
+
+
+def submit_deposit(uid, amt, ref):
+    """One deposit request from the bot chat or the Mini App. Returns (status, message):
+    status 'approved' | 'pending' | 'error'."""
+    ref = str(ref or "").replace(" ", "").upper()
+    if amt < MIN_DEPOSIT:
+        return "error", L(uid, "\u26a0\ufe0f \u12dd\u1245\u1270\u129b\u12cd \u1308\u1295\u12d8\u1265 \u121b\u1235\u1308\u1262\u12eb %d \u1265\u122d \u1290\u12cd\u1362" % MIN_DEPOSIT,
+                          "\u26a0\ufe0f The minimum deposit is %d ETB." % MIN_DEPOSIT)
+    inc, req_id = None, None
+    with closing(db()) as con:
+        con.execute("BEGIN IMMEDIATE")  # check + insert as one step, so the same ID cannot slip in twice
+        pending = con.execute("SELECT COUNT(*) FROM deposit_requests WHERE user_id=? AND status='pending'",
+                              (uid,)).fetchone()[0]
+        if pending >= MAX_PENDING_DEPOSITS:
+            con.rollback()
+            return "error", L(uid, "\u1265\u12d9 \u12eb\u120d\u1270\u1228\u130b\u1308\u1321 \u1325\u12eb\u1244\u12ce\u127d \u12a0\u1209\u12ce\u1275\u1362 \u12a0\u1235\u1270\u12f3\u12f3\u122a\u12cd \u12a5\u1235\u12aa\u12eb\u1228\u130b\u130d\u1325 \u12f5\u1228\u1235 \u12ed\u1320\u1265\u1241\u1362",
+                              "You have too many unreviewed requests. Please wait for the administrator.")
+        used = con.execute("SELECT 1 FROM deposit_requests WHERE UPPER(REPLACE(reference,' ',''))=? "
+                           "AND status IN ('pending','approved')", (ref,)).fetchone()
+        if used:
+            con.rollback()
+            return "error", L(uid, "\u12ed\u1205 \u12e8\u130d\u1265\u12ed\u1275 \u1241\u1325\u122d \u1240\u12f0\u121d \u1232\u120d \u1270\u1218\u12dd\u130d\u1267\u120d\u1362 \u12a5\u1263\u12ad\u12ce \u1275\u12ad\u12ad\u1208\u129b\u12cd\u1295 \u1241\u1325\u122d \u12eb\u1235\u1308\u1261\u1362",
+                              "This transaction ID was already used. Please send the correct one.")
+        cur = con.execute("INSERT INTO deposit_requests(user_id, method, amount, reference) VALUES(?,?,?,?)",
+                          (uid, "Telebirr", amt, ref))
+        req_id = cur.lastrowid
+        inc = con.execute("SELECT * FROM incoming_payments WHERE ref=? AND used_by_req IS NULL", (ref,)).fetchone()
+        con.commit()
+    if inc is not None:
+        # the owner's phone already reported this payment: verify and approve at once
+        req = {"id": req_id, "user_id": uid, "method": "Telebirr", "amount": amt, "reference": ref}
+        res = auto_approve(req, inc["amount"], parse_db_time(inc["paid_at"]), inc["sender"])
+        if res == "approved":
+            return "approved", L(uid, "\u2705 \u12ad\u134d\u12eb\u12ce \u1270\u1228\u130b\u130d\u1327\u120d!", "\u2705 Your payment is confirmed!")
+    else:
+        notify_deposit(req_id, uid, "Telebirr", amt, ref)
+    return "pending", L(uid, "\u23f3 \u1325\u12eb\u1244\u12ce \u12f0\u122d\u1236\u1293\u120d\u1362 \u12ad\u134d\u12eb\u12cd \u1232\u1228\u130b\u1308\u1325 \u12c8\u12f2\u12eb\u12cd\u1291 \u12c8\u12f0 \u1202\u1233\u1265\u12ce \u12ed\u1328\u1218\u122b\u120d\u1362",
+                        "\u23f3 We received your request. It is added to your balance as soon as the payment is confirmed.")
 
 
 def review_deposit(req_id, decision, admin_id):
-    """Approve/reject a pending deposit exactly once. Returns the request row, or None if not pending."""
-    status = "approved" if decision == "approve" else "rejected"
+    """Approve/reject a pending deposit exactly once. Returns something truthy, or None if not pending."""
+    if decision == "approve":
+        return approve_deposit(req_id, admin_id, "admin")
     with closing(db()) as con:
         cur = con.execute(
-            "UPDATE deposit_requests SET status=?, reviewed_at=CURRENT_TIMESTAMP, reviewed_by=? "
-            "WHERE id=? AND status='pending'", (status, int(admin_id), req_id))
+            "UPDATE deposit_requests SET status='rejected', reviewed_at=CURRENT_TIMESTAMP, reviewed_by=? "
+            "WHERE id=? AND status='pending'", (int(admin_id), req_id))
         if cur.rowcount != 1:
             con.commit()
             return None
         row = con.execute("SELECT * FROM deposit_requests WHERE id=?", (req_id,)).fetchone()
-        if decision == "approve":
-            con.execute("UPDATE users SET credits=credits+? WHERE user_id=?", (row["amount"], row["user_id"]))
         con.commit()
-    send_to_chat(row["user_id"], tr(row["user_id"], "dep_" + status, amount=money(row["amount"])))
-    return row
+    send_to_chat(row["user_id"], tr(row["user_id"], "dep_rejected", amount=money(row["amount"])))
+    return dict(row)
+
+
+# ---------------- promo codes ----------------
+def redeem_promo(uid, code):
+    """Returns (result, reward): ok | invalid | expired | used_up | already."""
+    code = re.sub(r"\s+", "", str(code or "")).upper()[:40]
+    if not code:
+        return "invalid", 0
+    with closing(db()) as con:
+        con.execute("BEGIN IMMEDIATE")
+        p = con.execute("SELECT * FROM promo_codes WHERE code=?", (code,)).fetchone()
+        if p is None or not p["active"]:
+            con.rollback()
+            return "invalid", 0
+        if p["expires_at"] and p["expires_at"] < fmt_db(utc_now()):
+            con.rollback()
+            return "expired", 0
+        if p["max_uses"] and p["uses"] >= p["max_uses"]:
+            con.rollback()
+            return "used_up", 0
+        if con.execute("SELECT 1 FROM promo_uses WHERE code=? AND user_id=?", (code, uid)).fetchone():
+            con.rollback()
+            return "already", 0
+        con.execute("INSERT INTO promo_uses(code, user_id) VALUES(?,?)", (code, uid))
+        con.execute("UPDATE promo_codes SET uses=uses+1 WHERE code=?", (code,))
+        con.execute("UPDATE users SET credits=credits+? WHERE user_id=?", (p["reward"], uid))
+        con.commit()
+        return "ok", float(p["reward"])
+
+
+def promo_message(uid, result, reward):
+    if result == "ok":
+        return L(uid, "\U0001f389 \u1270\u1233\u12ad\u1277\u120d! %s \u1265\u122d \u12c8\u12f0 \u1218\u132b\u12c8\u127b \u1202\u1233\u1265\u12ce \u1270\u1328\u121d\u122f\u120d\u1362" % money(reward),
+                 "\U0001f389 Done! %s ETB was added to your Play wallet." % money(reward))
+    return {
+        "expired": L(uid, "\u231b \u12ed\u1205 \u12ae\u12f5 \u130a\u12dc\u12cd \u12a0\u120d\u134e\u1260\u1273\u120d\u1362", "\u231b This code has expired."),
+        "used_up": L(uid, "\U0001f614 \u12ed\u1205 \u12ae\u12f5 \u1219\u1209 \u1260\u1219\u1209 \u1325\u1245\u121d \u120b\u12ed \u12cd\u120f\u120d\u1362", "\U0001f614 This code has been fully used."),
+        "already": L(uid, "\u2139\ufe0f \u12ed\u1205\u1295 \u12ae\u12f5 \u1240\u12f0\u121d \u1265\u1208\u12cd \u1270\u1320\u1245\u1218\u12cb\u120d\u1362", "\u2139\ufe0f You already used this code."),
+    }.get(result, L(uid, "\u274c \u12ae\u12f1 \u1275\u12ad\u12ad\u120d \u12a0\u12ed\u12f0\u1208\u121d\u1362 \u12a5\u1263\u12ad\u12ce \u12a5\u1295\u12f0\u1308\u1293 \u12ed\u121e\u12ad\u1229\u1362", "\u274c Invalid code. Please try again."))
+
+
+# ---------------- referral ----------------
+def set_referrer(uid, inviter_raw):
+    try:
+        inv = int(inviter_raw)
+    except (TypeError, ValueError):
+        return
+    if inv == int(uid):
+        return
+    with closing(db()) as con:
+        if con.execute("SELECT 1 FROM users WHERE user_id=?", (inv,)).fetchone() is None:
+            return
+        con.execute("UPDATE users SET referred_by=? WHERE user_id=? AND referred_by IS NULL", (inv, int(uid)))
+        con.commit()
+
+
+def referral_stats(uid):
+    with closing(db()) as con:
+        r = con.execute(
+            "SELECT COUNT(*) AS n, COALESCE(SUM(CASE WHEN referral_paid>0 THEN 1 ELSE 0 END),0) AS paid, "
+            "COALESCE(SUM(referral_paid),0) AS earned FROM users WHERE referred_by=?", (int(uid),)).fetchone()
+        return r["n"], r["paid"], r["earned"]
+
+
+def announce_recipients(audience):
+    with closing(db()) as con:
+        if audience == "players":
+            rows = con.execute("SELECT DISTINCT user_id FROM round_players").fetchall()
+        else:
+            rows = con.execute("SELECT user_id FROM users").fetchall()
+    return [int(r[0]) for r in rows]
 
 
 def review_withdraw(req_id, decision):
@@ -927,7 +1565,7 @@ INDEX_HTML = r"""<!doctype html>
 <html lang="am"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="theme-color" content="#06180d"><title>&#x1260;&#x123D; &#x1260;&#x123D; &#x1262;&#x1295;&#x130E;</title><script src="https://telegram.org/js/telegram-web-app.js"></script><link rel="stylesheet" href="/static/style.css"></head>
 <body><main class="app-shell">
 <header class="topbar">
-  <div class="brand-info"><div class="eyebrow">&#x26A1; &#x1260;&#x123D; &#x1260;&#x123D; &#x1262;&#x1295;&#x130E; &#xB7; v9</div><h1 id="round-title">&#x12D9;&#x122D; #1</h1></div>
+  <div class="brand-info"><div class="eyebrow">&#x26A1; &#x1260;&#x123D; &#x1260;&#x123D; &#x1262;&#x1295;&#x130E; &#xB7; v10</div><h1 id="round-title">&#x12D9;&#x122D; #1</h1></div>
   <div class="top-scores">
     <div class="score-box"><span>PLAY</span><strong id="play-bal">0.00</strong></div>
     <div class="score-box win"><span>WIN</span><strong id="win-bal">0.00</strong></div>
@@ -973,10 +1611,14 @@ INDEX_HTML = r"""<!doctype html>
   </div>
   <div id="deposit-form" class="sub-form">
     <h3>&#x1308;&#x1295;&#x12D8;&#x1265; &#x121B;&#x1235;&#x1308;&#x1263;&#x1275;</h3>
-    <select id="deposit-method"><option>Telebirr</option><option>CBE Birr</option></select>
-    <input id="deposit-amount" type="number" placeholder="&#x12E8;&#x1308;&#x1295;&#x12D8;&#x1265; &#x1218;&#x1320;&#x1295; (&#x1265;&#x122D;)">
-    <input id="deposit-reference" placeholder="Transaction ID">
-    <div class="hint">&#x1275;&#x12AD;&#x12AD;&#x1208;&#x129B;&#x12CD;&#x1295; &#x12E8;&#x130D;&#x1265;&#x12ED;&#x1275; &#x1241;&#x1325;&#x122D; (Transaction ID) &#x12A8;&#x12F0;&#x1228;&#x1230;&#x1299; &#x120B;&#x12ED; &#x12EB;&#x1235;&#x1308;&#x1261;&#x1362; &#x12EB;&#x1235;&#x1308;&#x1261;&#x1275; &#x1265;&#x122D; &#x1270;&#x1218;&#x120B;&#x123D; &#x12A0;&#x12ED;&#x12F0;&#x1228;&#x130D;&#x121D;&#x1364; &#x1208;&#x1328;&#x12CB;&#x1273; &#x12ED;&#x12CD;&#x120B;&#x120D;&#x1362;</div>
+    <div class="pay-box">
+      <div>&#x1F4DE; <b id="pay-number">0928564065</b> <button id="copy-pay" class="copy-btn" type="button">&#x1245;&#x12F3;</button></div>
+      <div>&#x1F464; &#x1235;&#x121D;: <b id="pay-name">Eineyew</b> &#xB7; Telebirr</div>
+    </div>
+    <div id="bonus-banner" class="bonus-banner" style="display:none"></div>
+    <input id="deposit-amount" type="number" placeholder="&#x1235;&#x1295;&#x1275; &#x1265;&#x122D;? (&#x1262;&#x12EB;&#x1295;&#x1235; 20)">
+    <input id="deposit-reference" placeholder="Transaction ID &#x12C8;&#x12ED;&#x121D; &#x12E8; SMS &#x133D;&#x1201;&#x134D;">
+    <div class="hint">1. &#x12A8;&#x120B;&#x12ED; &#x12C8;&#x12F3;&#x1208;&#x12CD; &#x1241;&#x1325;&#x122D; &#x1260; Telebirr &#x12ED;&#x12AD;&#x1348;&#x1209;&#x1362; 2. &#x12A8; Telebirr &#x12E8;&#x12F0;&#x1228;&#x1230;&#x12CE;&#x1275;&#x1295; &#x12E8;&#x130D;&#x1265;&#x12ED;&#x1275; &#x1241;&#x1325;&#x122D; (Transaction ID) &#x12C8;&#x12ED;&#x121D; &#x12E8; SMS &#x133D;&#x1201;&#x1349;&#x1295; &#x1219;&#x1209; &#x12EB;&#x1235;&#x1308;&#x1261;&#x1362; &#x12AD;&#x134D;&#x12EB;&#x12CD; &#x1232;&#x1228;&#x130B;&#x1308;&#x1325; &#x12C8;&#x12F2;&#x12EB;&#x12CD;&#x1291; &#x12C8;&#x12F0; &#x1202;&#x1233;&#x1265;&#x12CE; &#x12ED;&#x1328;&#x1218;&#x122B;&#x120D;&#x1362; &#x12DD;&#x1245;&#x1270;&#x129B;&#x12CD; 20 &#x1265;&#x122D; &#x1290;&#x12CD;&#x1364; &#x12EB;&#x1235;&#x1308;&#x1261;&#x1275; &#x1265;&#x122D; &#x1270;&#x1218;&#x120B;&#x123D; &#x12A0;&#x12ED;&#x12F0;&#x1228;&#x130D;&#x121D;&#x1362;</div>
     <button id="send-deposit" class="primary-btn btn-deposit">&#x1325;&#x12EB;&#x1244; &#x120B;&#x12AD;</button>
   </div>
   <div id="withdraw-form" class="sub-form" style="display:none;">
@@ -1052,7 +1694,14 @@ ADMIN_HTML = r"""<!doctype html><html lang="am"><head><meta charset="utf-8"><met
 <h2>&#x1F534; &#x12A0;&#x1201;&#x1295; &#x1260;&#x1328;&#x12CB;&#x1273; &#x120B;&#x12ED;</h2><div class="req" id="live-box">&#x1260;&#x1218;&#x132B;&#x1295; &#x120B;&#x12ED;...</div>
 <h2>&#x1F4CA; &#x1235;&#x1273;&#x1272;&#x1235;&#x1272;&#x12AD;&#x1235;</h2><div class="stat-grid" id="stats-box"></div>
 <h2>&#x1F558; &#x12E8;&#x130C;&#x121D; &#x1202;&#x1235;&#x1275;&#x122A;</h2><div id="hist-list">&#x1260;&#x1218;&#x132B;&#x1295; &#x120B;&#x12ED;...</div>
-<h2>&#x12E8;&#x1308;&#x1295;&#x12D8;&#x1265; &#x121B;&#x1235;&#x1308;&#x1262;&#x12EB; &#x1325;&#x12EB;&#x1244;&#x12CE;&#x127D;</h2><div id="req-list">&#x1260;&#x1218;&#x132B;&#x1295; &#x120B;&#x12ED;...</div><h2>&#x12E8;&#x121B;&#x12CD;&#x1323;&#x1275; &#x1325;&#x12EB;&#x1244;&#x12CE;&#x127D;</h2><div id="wd-list">&#x1260;&#x1218;&#x132B;&#x1295; &#x120B;&#x12ED;...</div><script src="/static/admin.js"></script></body></html>"""
+<h2>&#x12E8;&#x1308;&#x1295;&#x12D8;&#x1265; &#x121B;&#x1235;&#x1308;&#x1262;&#x12EB; &#x1325;&#x12EB;&#x1244;&#x12CE;&#x127D;</h2><div id="req-list">&#x1260;&#x1218;&#x132B;&#x1295; &#x120B;&#x12ED;...</div><h2>&#x12E8;&#x121B;&#x12CD;&#x1323;&#x1275; &#x1325;&#x12EB;&#x1244;&#x12CE;&#x127D;</h2><div id="wd-list">&#x1260;&#x1218;&#x132B;&#x1295; &#x120B;&#x12ED;...</div><h2>&#x1F4F2; SMS &#x122B;&#x1235;-&#x121B;&#x133D;&#x12F0;&#x1245;</h2><div class="req" id="sms-box">...</div>
+<h2>&#x1F381; &#x12E8;&#x1266;&#x1290;&#x1235; &#x1205;&#x130E;&#x127D; (&#x12E8;&#x12A2;&#x1275;&#x12EE;&#x1335;&#x12EB; &#x1230;&#x12D3;&#x1275;)</h2><div id="rules-box"></div><button id="add-rule" class="primary-btn">&#x2795; &#x12A0;&#x12F2;&#x1235; &#x1205;&#x130D;</button>
+<h2>&#x1F3F7; &#x1355;&#x122E;&#x121E; &#x12AE;&#x12F6;&#x127D;</h2>
+<div class="rule-card"><div class="grid2"><input type="text" id="pc-code" placeholder="&#x12AE;&#x12F5;"><input type="number" id="pc-reward" placeholder="&#x123D;&#x120D;&#x121B;&#x1275; (&#x1265;&#x122D;)"></div>
+<div class="grid2"><input type="number" id="pc-max" placeholder="&#x12A8;&#x134D;&#x1270;&#x129B; &#x1270;&#x1320;&#x1243;&#x121A; &#x1265;&#x12DB;&#x1275; (0 = &#x12EB;&#x120D;&#x1270;&#x12C8;&#x1230;&#x1290;)"><input type="date" id="pc-exp" title="&#x12E8;&#x121A;&#x12EB;&#x1260;&#x1243;&#x1260;&#x1275; &#x1240;&#x1295;"></div>
+<button id="pc-save" class="primary-btn">&#x1F4BE; &#x12AE;&#x12F1;&#x1295; &#x12A0;&#x1235;&#x1240;&#x121D;&#x1325;</button></div><div id="promo-list"></div>
+<h2>&#x1F517; &#x122A;&#x1348;&#x122B;&#x120D;</h2><div id="ref-box"></div>
+<script src="/static/admin.js"></script></body></html>"""
 
 STYLE_CSS = r""":root{color-scheme:dark;--bg:#041509;--panel:#0b2113;--panel2:#102d19;--line:#20552d;--text:#f4f7f4;--muted:#a3b8a8;--gold:#ffe629;--teal:#39d66f}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);font-family:system-ui,"Noto Sans Ethiopic","Nyala","Abyssinica SIL",sans-serif;color:var(--text);padding-bottom:70px}
@@ -1131,6 +1780,16 @@ input,select{width:100%;background:var(--panel2);border:1px solid var(--line);pa
 .pat-cell{aspect-ratio:1;background:#12301c;border-radius:3px}
 .pat-cell.on{background:var(--teal);box-shadow:0 0 6px #39d66f99}
 .rules-ok{margin:10px 12px 14px;padding:14px;border:0;border-radius:12px;background:linear-gradient(135deg,#39d66f,#1fa44f);color:#041509;font-weight:900;font-size:15px;cursor:pointer}
+.pay-box{background:#06180d;border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin:8px 0;line-height:1.7;font-size:14px}
+.pay-box b{color:var(--gold);letter-spacing:.5px}
+.copy-btn{margin-left:8px;border:0;border-radius:6px;padding:3px 10px;background:var(--teal);color:#041509;font-weight:800;cursor:pointer}
+.bonus-banner{margin:8px 0;padding:9px 12px;border-radius:10px;background:linear-gradient(135deg,#ffe629,#f5a300);color:#2a1d00;font-weight:900;font-size:14px;text-align:center}
+.rule-card{border:1px solid var(--line);border-radius:10px;padding:10px;margin:8px 0;background:var(--panel)}
+.rule-card input[type=text],.rule-card input[type=number],.rule-card input[type=time],.rule-card input[type=date]{width:100%;margin:3px 0}
+.rule-card .grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.rule-card label.d{display:inline-block;margin:2px 6px 2px 0;font-size:13px}
+.eth{color:var(--gold);font-size:12px}
+.rule-card input[type=checkbox]{width:auto;min-width:0;height:auto;margin:0 4px;padding:0;vertical-align:middle}
 """
 
 APP_JS = r"""(() => {
@@ -1220,6 +1879,17 @@ function render() {
   document.getElementById('win-bal').textContent = (model.win_credits || 0).toFixed(2);
   document.getElementById('w-play').textContent = model.credits.toFixed(2);
   document.getElementById('w-win').textContent = (model.win_credits || 0).toFixed(2);
+  if (model.pay_number) {
+    document.getElementById('pay-number').textContent = model.pay_number;
+    document.getElementById('pay-name').textContent = model.pay_name;
+  }
+  const bb = document.getElementById('bonus-banner');
+  if (bb) {
+    if (model.bonus_percent > 0) {
+      bb.style.display = 'block';
+      bb.textContent = '\uD83C\uDF81 \u12A0\u1201\u1295 \u1266\u1290\u1235: ' + model.bonus_percent + '%' + (model.bonus_cap > 0 ? ' (\u12A5\u1235\u12A8 ' + model.bonus_cap + ' \u1265\u122D)' : '');
+    } else { bb.style.display = 'none'; }
+  }
   document.getElementById('current').textContent = model.current_number ?? '\u2014';
 
   if (model.current_number) speakNumber(model.current_number);
@@ -1382,12 +2052,16 @@ function walletView(which) {
 }
 document.getElementById('show-deposit').onclick = () => walletView('deposit');
 document.getElementById('show-withdraw').onclick = () => walletView('withdraw');
+document.getElementById('copy-pay').onclick = () => {
+  const n = document.getElementById('pay-number').textContent;
+  try { navigator.clipboard.writeText(n).then(() => toast('\u1270\u1240\u12F5\u1277\u120D'), () => toast(n)); } catch (e) { toast(n); }
+};
 document.getElementById('send-deposit').onclick = () => {
   const amount = Number(document.getElementById('deposit-amount').value);
-  const method = document.getElementById('deposit-method').value;
   const reference = document.getElementById('deposit-reference').value.trim();
   if (!amount || reference.length < 3) { toast('\u12A5\u1263\u12AD\u12CE \u1218\u1228\u1303\u12CD\u1295 \u12ED\u1219\u1209'); return; }
-  action('/api/miniapp/deposit-request', { amount, method, reference })
+  if (amount < 20) { toast('\u12DD\u1245\u1270\u129B\u12CD \u1308\u1295\u12D8\u1265 \u121B\u1235\u1308\u1262\u12EB 20 \u1265\u122D \u1290\u12CD'); return; }
+  action('/api/miniapp/deposit-request', { amount, method: 'Telebirr', reference })
     .then(() => { document.getElementById('deposit-reference').value = ''; });
 };
 document.getElementById('send-withdraw').onclick = () => {
@@ -1500,7 +2174,7 @@ async function load() {
         `<button onclick="review(${Number(q.id)},'reject')" style="${BTN}background:#d63939;color:#fff">\u12CD\u12F5\u1245</button>`
       : `<i>${esc(q.status)}</i>`;
     return `<div class="req"><b>#${Number(q.id)} \u00B7 ${esc(q.amount)} \u1265\u122D (${esc(q.method)})</b>
-      <p>User: ${esc(q.user_id)} | Ref: ${esc(q.reference)}</p><p>\uD83D\uDD52 ${esc(fmtTime(q.created_at))}</p>${buttons}</div>`;
+      <p>User: ${esc(q.user_id)} | Ref: ${esc(q.reference)}</p>${Number(q.bonus) > 0 ? `<p>\uD83C\uDF81 \u1266\u1290\u1235 +${birr(q.bonus)} \u1265\u122D</p>` : ''}${q.approved_via === 'sms' ? '<p>\uD83D\uDCF2 \u122B\u1235-\u1230\u122D (SMS)</p>' : ''}<p>\uD83D\uDD52 ${esc(fmtTime(q.created_at))}</p>${buttons}</div>`;
   }).join('') || '\u2014';
   document.getElementById('wd-list').innerHTML = (d.withdrawals || []).map(q => {
     const buttons = q.status === 'pending'
@@ -1519,7 +2193,98 @@ async function reviewWd(id, decision) {
   await fetch(`/api/admin/withdraw/${id}/review`, {method: 'POST', headers: HEADERS(), body: JSON.stringify({decision})});
   load();
 }
-document.getElementById('refresh').onclick = load; load();
+const DAYN = ['\u1230\u129E', '\u121B\u12AD\u1230\u129E', '\u1228\u1261\u12D5', '\u1210\u1219\u1235', '\u12D3\u122D\u1265', '\u1245\u12F3\u121C', '\u12A5\u1201\u12F5'];
+function ethTime(min) {
+  const h = Math.floor(min / 60) % 24, m = min % 60;
+  let eh = ((h - 6) % 12 + 12) % 12; if (eh === 0) eh = 12;
+  const p = (h >= 6 && h < 12) ? '\u1320\u12CB\u1275' : (h >= 12 && h < 18) ? '\u12A8\u1240\u1291' : (h >= 18 ? '\u121D\u123D\u1275' : '\u120C\u120A\u1275');
+  return p + ' ' + eh + (m ? ':' + String(m).padStart(2, '0') : '') + ' \u1230\u12D3\u1275';
+}
+function hhmm(min) { return String(Math.floor(min / 60) % 24).padStart(2, '0') + ':' + String(min % 60).padStart(2, '0'); }
+function toMin(v, isEnd) { const p = String(v || '0:0').split(':'); const m = (+p[0]) * 60 + (+p[1] || 0); return (isEnd && m === 0) ? 1440 : m; }
+async function postJson(path, body) {
+  const r = await fetch(path, {method: 'POST', headers: HEADERS(), body: JSON.stringify(body)});
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) { alert(d.error || 'Error'); return false; }
+  return true;
+}
+function ethUpd(i) {
+  const s = toMin(document.getElementById('r' + i + '-s').value, false), e = toMin(document.getElementById('r' + i + '-e').value, true);
+  document.getElementById('r' + i + '-eth').textContent = '\uD83D\uDD52 ' + ethTime(s) + ' \u2192 ' + ethTime(e % 1440);
+}
+function ruleCard(r, i) {
+  const days = String(r.days || '').split(',').filter(x => x !== '').map(Number);
+  const dayBoxes = DAYN.map((n, d) => `<label class="d"><input type="checkbox" class="r${i}-d" value="${d}" ${days.includes(d) ? 'checked' : ''}> ${n}</label>`).join('');
+  return `<div class="rule-card"><input type="text" id="r${i}-n" placeholder="\u1235\u121D" value="${esc(r.name)}">` +
+    `<div>${dayBoxes}<div class="eth">\u121D\u1295\u121D \u1240\u1295 \u12AB\u120D\u1270\u1218\u1228\u1320 \u1260\u1201\u1209\u121D \u1240\u1293\u1275 \u12ED\u1220\u122B\u120D</div></div>` +
+    `<div class="grid2"><div>\u12A8 (\u1218\u12F0\u1260\u129B \u1230\u12D3\u1275)<input type="time" id="r${i}-s" value="${hhmm(r.start_min)}" oninput="ethUpd(${i})"></div>` +
+    `<div>\u12A5\u1235\u12A8<input type="time" id="r${i}-e" value="${hhmm(r.end_min % 1440)}" oninput="ethUpd(${i})"></div></div><div class="eth" id="r${i}-eth"></div>` +
+    `<div class="grid2"><div>\u1266\u1290\u1235 %<input type="number" id="r${i}-p" value="${Number(r.percent)}"></div>` +
+    `<div>\u12A8\u134D\u1270\u129B (\u1265\u122D, 0 = \u1308\u12F0\u1265 \u12E8\u1208\u121D)<input type="number" id="r${i}-c" value="${Number(r.cap)}"></div></div>` +
+    `<label><input type="checkbox" id="r${i}-a" ${r.active ? 'checked' : ''}> \u1295\u1241</label> ` +
+    `<button onclick="saveRule(${i})" style="${BTN}background:#39d66f">\uD83D\uDCBE \u12A0\u1235\u1240\u121D\u1325</button>` +
+    (r.id ? `<button onclick="delRule(${i})" style="${BTN}background:#d63939;color:#fff">\uD83D\uDDD1 \u1230\u122D\u12DD</button>` : '') + `</div>`;
+}
+let RULES = [];
+function renderRules(list) {
+  RULES = list;
+  document.getElementById('rules-box').innerHTML = list.map(ruleCard).join('') || '\u2014';
+  list.forEach((r, i) => ethUpd(i));
+}
+async function saveRule(i) {
+  const g = id => document.getElementById('r' + i + '-' + id);
+  const days = Array.from(document.querySelectorAll('.r' + i + '-d')).filter(x => x.checked).map(x => Number(x.value));
+  const ok = await postJson('/api/admin/bonus-rule', {id: RULES[i].id || null, name: g('n').value, days, start: toMin(g('s').value, false),
+    end: toMin(g('e').value, true), percent: Number(g('p').value), cap: Number(g('c').value || 0), active: g('a').checked});
+  if (ok) loadSettings();
+}
+async function delRule(i) { if (confirm('\u12ED\u1205 \u1205\u130D \u12ED\u1230\u1228\u12DD?') && await postJson('/api/admin/bonus-rule', {id: RULES[i].id, delete: true})) loadSettings(); }
+document.getElementById('add-rule').onclick = () => {
+  RULES.push({id: null, name: '', days: '', start_min: 0, end_min: 1440, percent: 10, cap: 0, active: 1});
+  renderRules(RULES);
+};
+document.getElementById('pc-save').onclick = async () => {
+  const ok = await postJson('/api/admin/promo', {code: document.getElementById('pc-code').value, reward: Number(document.getElementById('pc-reward').value),
+    max_uses: Number(document.getElementById('pc-max').value || 0), expires: document.getElementById('pc-exp').value});
+  if (ok) { ['pc-code', 'pc-reward', 'pc-max', 'pc-exp'].forEach(x => document.getElementById(x).value = ''); loadSettings(); }
+};
+async function promoAct(code, what) {
+  if (what === 'delete' && !confirm('\u12AE\u12F1 \u12ED\u1230\u1228\u12DD?')) return;
+  if (await postJson('/api/admin/promo', {code, [what]: true})) loadSettings();
+}
+function renderPromos(list) {
+  document.getElementById('promo-list').innerHTML = list.map(p =>
+    `<div class="req"><b>${esc(p.code)}</b> \u00B7 ${birr(p.reward)} \u1265\u122D ${p.active ? '\u2705' : '\u23F8'}` +
+    `<p>\u1325\u1245\u121D \u120B\u12ED \u12E8\u12CB\u1208: ${Number(p.uses)}${p.max_uses ? ' / ' + Number(p.max_uses) : ' (\u12EB\u120D\u1270\u12C8\u1230\u1290)'}` +
+    (p.expires_at ? ` \u00B7 \u12A5\u1235\u12A8: ${esc(fmtTime(p.expires_at))}` : '') + `</p>` +
+    `<button onclick="promoAct('${esc(p.code)}','toggle')" style="${BTN}background:#ffe629">${p.active ? '\u12A0\u1241\u121D' : '\u12A0\u1235\u1300\u121D\u122D'}</button>` +
+    `<button onclick="promoAct('${esc(p.code)}','delete')" style="${BTN}background:#d63939;color:#fff">\uD83D\uDDD1</button></div>`).join('') || '\u2014';
+}
+function renderSms(s, incoming) {
+  document.getElementById('sms-box').innerHTML =
+    `<p>\uD83D\uDCDE ${esc(s.number)} \u00B7 ${esc(s.name)}</p>` +
+    (s.configured ? `<p>\u2705 SMS_SECRET \u1270\u12D8\u130B\u1305\u1277\u120D\u1362 \u1235\u120D\u12AD\u1205 \u120B\u12ED \u12E8 SMS forwarder \u1218\u1270\u130D\u1260\u122A\u12EB \u12CD\u1235\u1325 \u12ED\u1205\u1295 \u12A0\u12F5\u122B\u123B (POST) \u12A0\u1235\u1308\u1263:</p>` +
+      `<input type="text" readonly style="width:100%" value="${esc(s.url || 'RENDER_EXTERNAL_URL \u12A0\u120D\u1270\u12D8\u130B\u1300\u121D')}" onclick="this.select()">`
+      : `<p>\u26A0\uFE0F SMS_SECRET \u1260 Render Environment \u12CD\u1235\u1325 \u12A0\u120D\u1270\u12D8\u130B\u1300\u121D\u1364 \u122B\u1235-\u121B\u133D\u12F0\u1245 \u1320\u134D\u1277\u120D (\u1260\u12A5\u1305 \u121B\u133D\u12F0\u1245 \u12ED\u1220\u122B\u120D)\u1362</p>`) +
+    `<p><b>\u12E8\u1245\u122D\u1265 \u130A\u12DC \u12E8\u12F0\u1228\u1231 \u12AD\u134D\u12EB\u12CE\u127D:</b></p>` +
+    ((incoming || []).map(x => `<div class="pl">${esc(x.ref)} \u00B7 ${birr(x.amount)} \u1265\u122D \u00B7 \u2026${esc(x.sender)} \u00B7 ${x.used_by_req ? '\u2705 #' + Number(x.used_by_req) : '\u23F3 \u12EB\u120D\u1270\u1323\u1218\u1228'} \u00B7 ${esc(fmtTime(x.paid_at))}</div>`).join('') || '\u2014');
+}
+function renderRefs(r) {
+  document.getElementById('ref-box').innerHTML =
+    `<div class="req"><p>\u123D\u120D\u121B\u1275: ${birr(r.reward)} \u1265\u122D (\u1208\u121A\u130B\u1265\u12D8\u12CD\u1363 \u12E8\u1270\u130B\u1263\u12E1 \u12E8\u1218\u1300\u1218\u122A\u12EB \u1308\u1295\u12D8\u1265 \u1232\u1338\u12F5\u1245)</p><b>\u12A8\u134D\u1270\u129B \u130B\u1263\u12E6\u127D</b>` +
+    (r.top.map(t => `<div class="pl">${esc(t.name)} (ID ${esc(t.inviter)}) \u2014 ${Number(t.invited)} \u130B\u1265\u12DF\u120D \u00B7 ${Number(t.paid)} \u12EB\u1235\u1308\u1261 \u00B7 ${birr(t.earned)} \u1265\u122D</div>`).join('') || '<p>\u2014</p>') +
+    `<b>\u12E8\u1245\u122D\u1265 \u130A\u12DC \u130D\u1265\u12E3\u12CE\u127D</b>` +
+    (r.recent.map(t => `<div class="pl">${esc(t.name)} \u2190 ${esc(t.inviter_name)} ${Number(t.referral_paid) > 0 ? '\u2705' : '\u23F3'}</div>`).join('') || '<p>\u2014</p>') + `</div>`;
+}
+async function loadSettings() {
+  try {
+    const r = await fetch('/api/admin/settings', {headers: HEADERS()});
+    if (!r.ok) return;
+    const d = await r.json();
+    renderRules(d.rules); renderPromos(d.promos); renderSms(d.sms, d.incoming); renderRefs(d.referrals);
+  } catch (e) {}
+}
+document.getElementById('refresh').onclick = () => { load(); loadSettings(); }; load(); loadSettings();
 setInterval(loadLive, 5000);
 """
 
@@ -1574,12 +2339,13 @@ def api_miniapp_game():
         for cid in my_cards:
             mat = game_state["card_matrices"].get((uid, cid))
             if mat is None:
-                mat = generate_75_bingo_card(cid * 999 + uid)
+                mat = generate_75_bingo_card(cid)
                 game_state["card_matrices"][(uid, cid)] = mat
             mset = list(game_state["marked"].setdefault((uid, cid), {"FREE"}))
             my_cards_data.append({"card_id": cid, "matrix": mat, "marked": mset})
 
         return jsonify({
+            **bonus_info(),
             "round": game_state["round"],
             "phase": game_state["phase"],
             "selection_ends_at": game_state["selection_ends_at"],
@@ -1642,7 +2408,7 @@ def api_miniapp_select_card():
         my_cards.append(card_num)
         game_state["prize"] += CARD_COST
         game_state["card_paid_from"][(uid, card_num)] = wallet
-        game_state["card_matrices"][(uid, card_num)] = generate_75_bingo_card(card_num * 999 + uid)
+        game_state["card_matrices"][(uid, card_num)] = generate_75_bingo_card(card_num)
         game_state["marked"][(uid, card_num)] = {"FREE"}
 
     return jsonify({"message": f"\u12ab\u122d\u12f5 #{card_num} \u1270\u12ed\u12df\u120d!"})
@@ -1703,33 +2469,15 @@ def api_miniapp_deposit():
         return json_error("Unauthorized", 401)
     body = request.get_json(silent=True) or {}
     amt = to_positive_float(body.get("amount"))
-    method = str(body.get("method") or "")[:30]
-    ref = clean_reference(body.get("reference"))
-    if not amt or not ref or method not in ("Telebirr", "CBE Birr"):
+    if not amt:
         return json_error("\u12a5\u1263\u12ad\u12ce \u1218\u1228\u1303\u12cd\u1295 \u12ed\u1219\u1209")
-    problem = reference_problem(ref)
-    if problem:
-        return json_error(problem)
-    with closing(db()) as con:
-        con.execute("BEGIN IMMEDIATE")  # check + insert as one step, so the same ID cannot slip in twice
-        pending = con.execute(
-            "SELECT COUNT(*) FROM deposit_requests WHERE user_id=? AND status='pending'",
-            (user["id"],)).fetchone()[0]
-        if pending >= MAX_PENDING_DEPOSITS:
-            con.rollback()
-            return json_error("\u1265\u12d9 \u12eb\u120d\u1270\u1228\u130b\u1308\u1321 \u1325\u12eb\u1244\u12ce\u127d \u12a0\u1209\u12ce\u1275\u1362 \u12a0\u1235\u1270\u12f3\u12f3\u122a\u12cd \u12a5\u1235\u12aa\u12eb\u1228\u130b\u130d\u1325 \u12f5\u1228\u1235 \u12ed\u1320\u1265\u1241\u1362")
-        used = con.execute(
-            "SELECT 1 FROM deposit_requests WHERE UPPER(REPLACE(reference,' ',''))=? "
-            "AND status IN ('pending','approved')", (ref,)).fetchone()
-        if used:
-            con.rollback()
-            return json_error("\u12ed\u1205 \u12e8\u130d\u1265\u12ed\u1275 \u1241\u1325\u122d \u1240\u12f0\u121d \u1232\u120d \u1270\u1218\u12dd\u130d\u1267\u120d\u1362 \u12a5\u1263\u12ad\u12ce \u1275\u12ad\u12ad\u1208\u129b\u12cd\u1295 \u1241\u1325\u122d \u12eb\u1235\u1308\u1261\u1362")
-        cur = con.execute("INSERT INTO deposit_requests(user_id, method, amount, reference) VALUES(?,?,?,?)",
-                          (user["id"], method, amt, ref))
-        req_id = cur.lastrowid
-        con.commit()
-    notify_deposit(req_id, user["id"], method, amt, ref)
-    return jsonify({"message": "\u12e8\u1308\u1295\u12d8\u1265 \u121b\u1235\u1308\u1262\u12eb \u1325\u12eb\u1244\u12ce \u1270\u120d\u12b3\u120d"})
+    ref, err = extract_reference(str(body.get("reference") or "")[:800])
+    if err:
+        return json_error(err)
+    status, message = submit_deposit(user["id"], amt, ref)
+    if status == "error":
+        return json_error(message)
+    return jsonify({"message": message})
 
 
 @app.post("/api/miniapp/withdraw-request")
@@ -1872,6 +2620,142 @@ def admin_review_withdraw(req_id):
     if review_withdraw(req_id, decision) is None:
         return json_error("Invalid request")
     return jsonify({"ok": True, "message": "\u1270\u1228\u130b\u130d\u1327\u120d"})
+
+
+@app.route("/api/sms-webhook", methods=["POST", "GET"])
+def sms_webhook():
+    """The owner's phone forwards every incoming Telebirr SMS here (see the admin panel for the address)."""
+    if not SMS_SECRET:
+        return json_error("SMS_SECRET is not set", 503)
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        data = {}
+
+    def pick(*names):
+        for n in names:
+            v = data.get(n)
+            if v is None:
+                v = request.values.get(n)
+            if v not in (None, ""):
+                return str(v)
+        return ""
+
+    key = request.args.get("key") or request.headers.get("X-Secret") or pick("key", "secret")
+    if not hmac.compare_digest(str(key).encode(), SMS_SECRET.encode()):
+        return json_error("forbidden", 403)
+    text = pick("message", "text", "body", "content", "sms", "msg")
+    if not text and not data and not request.form:
+        text = request.get_data(as_text=True) or ""
+    sender = pick("from", "sender", "address", "number")
+    if SMS_SENDER and sender and sender.strip().lower() != SMS_SENDER.lower():
+        return jsonify({"ok": True, "ignored": "sender"})
+    parsed = parse_telebirr_sms(text)
+    if not parsed:
+        return jsonify({"ok": True, "ignored": "not an incoming Telebirr payment"})
+    try:
+        result = handle_incoming_sms(parsed)
+    except Exception:
+        logger.exception("sms webhook failed")
+        return json_error("server error", 500)
+    logger.info("incoming SMS payment %s -> %s", parsed["ref"], result)
+    return jsonify({"ok": True, "result": result})
+
+
+@app.get("/api/admin/settings")
+def admin_settings():
+    user = api_admin()
+    if not user:
+        return json_error("Admin access denied", 403)
+    with closing(db()) as con:
+        rules = [dict(r) for r in con.execute("SELECT * FROM bonus_rules ORDER BY id").fetchall()]
+        promos = [dict(r) for r in con.execute("SELECT * FROM promo_codes ORDER BY created_at DESC").fetchall()]
+        incoming = [dict(r) for r in con.execute("SELECT * FROM incoming_payments ORDER BY id DESC LIMIT 15").fetchall()]
+        top = con.execute(
+            "SELECT referred_by AS inviter, COUNT(*) AS invited, "
+            "SUM(CASE WHEN referral_paid>0 THEN 1 ELSE 0 END) AS paid, COALESCE(SUM(referral_paid),0) AS earned "
+            "FROM users WHERE referred_by IS NOT NULL GROUP BY referred_by ORDER BY invited DESC LIMIT 20").fetchall()
+        recent = con.execute(
+            "SELECT user_id, referred_by, referral_paid, created_at FROM users WHERE referred_by IS NOT NULL "
+            "ORDER BY created_at DESC LIMIT 20").fetchall()
+    top = [dict(r, name=display_name(r["inviter"])) for r in top]
+    recent = [dict(r, name=display_name(r["user_id"]), inviter_name=display_name(r["referred_by"])) for r in recent]
+    url = (PUBLIC_URL + "/api/sms-webhook?key=" + SMS_SECRET) if (SMS_SECRET and PUBLIC_URL) else ""
+    return jsonify({"rules": rules, "promos": promos, "incoming": incoming,
+                    "referrals": {"top": top, "recent": recent, "reward": REFERRAL_REWARD},
+                    "sms": {"configured": bool(SMS_SECRET), "url": url, "number": PAY_NUMBER, "name": PAY_NAME}})
+
+
+@app.post("/api/admin/bonus-rule")
+def admin_bonus_rule():
+    user = api_admin()
+    if not user:
+        return json_error("Admin access denied", 403)
+    b = request.get_json(silent=True) or {}
+    rid = b.get("id")
+    with closing(db()) as con:
+        if b.get("delete"):
+            con.execute("DELETE FROM bonus_rules WHERE id=?", (int(rid or 0),))
+            con.commit()
+            return jsonify({"ok": True})
+        try:
+            days = sorted({int(x) for x in (b.get("days") or []) if 0 <= int(x) <= 6})
+            start, end = int(b.get("start")), int(b.get("end"))
+            percent, cap = float(b.get("percent")), float(b.get("cap") or 0)
+        except (TypeError, ValueError):
+            return json_error("\u1275\u12ad\u12ad\u120d \u12eb\u120d\u1206\u1290 \u1218\u1228\u1303")
+        if not (0 <= start < end <= 1440) or not (0 <= percent <= 1000) or cap < 0:
+            return json_error("\u1230\u12d3\u1271\u1295 \u12c8\u12ed\u121d \u1218\u1276\u129b\u12cd\u1295 \u12eb\u1228\u130b\u130d\u1321 (\u1218\u1300\u1218\u122a\u12eb \u12a8\u1218\u1328\u1228\u123b \u12eb\u1295\u1233\u120d)")
+        name = str(b.get("name") or "")[:40]
+        active = 1 if b.get("active") else 0
+        dstr = ",".join(str(d) for d in days)
+        if rid:
+            con.execute("UPDATE bonus_rules SET name=?, days=?, start_min=?, end_min=?, percent=?, cap=?, active=? WHERE id=?",
+                        (name, dstr, start, end, percent, cap, active, int(rid)))
+        else:
+            con.execute("INSERT INTO bonus_rules(name, days, start_min, end_min, percent, cap, active) VALUES(?,?,?,?,?,?,?)",
+                        (name, dstr, start, end, percent, cap, active))
+        con.commit()
+    return jsonify({"ok": True})
+
+
+@app.post("/api/admin/promo")
+def admin_promo():
+    user = api_admin()
+    if not user:
+        return json_error("Admin access denied", 403)
+    b = request.get_json(silent=True) or {}
+    code = re.sub(r"\s+", "", str(b.get("code") or "")).upper()[:40]
+    if not code:
+        return json_error("\u12ae\u12f1\u1295 \u12eb\u1235\u1308\u1261")
+    with closing(db()) as con:
+        if b.get("delete"):
+            con.execute("DELETE FROM promo_codes WHERE code=?", (code,))
+            con.commit()
+            return jsonify({"ok": True})
+        if b.get("toggle"):
+            con.execute("UPDATE promo_codes SET active=1-active WHERE code=?", (code,))
+            con.commit()
+            return jsonify({"ok": True})
+        try:
+            reward = float(b.get("reward"))
+            max_uses = int(b.get("max_uses") or 0)
+        except (TypeError, ValueError):
+            return json_error("\u1275\u12ad\u12ad\u120d \u12eb\u120d\u1206\u1290 \u1218\u1228\u1303")
+        if reward <= 0 or max_uses < 0:
+            return json_error("\u123d\u120d\u121b\u1271 \u12a80 \u1260\u120b\u12ed \u1218\u1206\u1295 \u12a0\u1208\u1260\u1275")
+        expires = None
+        if b.get("expires"):
+            try:   # the admin picks a date in Ethiopia time: valid until the end of that day
+                d = datetime.strptime(str(b["expires"])[:10], "%Y-%m-%d")
+                expires = fmt_db(d + timedelta(hours=24) - timedelta(hours=3) - timedelta(seconds=1))
+            except ValueError:
+                return json_error("\u1240\u1291 \u1275\u12ad\u12ad\u120d \u12a0\u12ed\u12f0\u1208\u121d")
+        con.execute(
+            "INSERT INTO promo_codes(code, reward, max_uses, expires_at, active) VALUES(?,?,?,?,1) "
+            "ON CONFLICT(code) DO UPDATE SET reward=excluded.reward, max_uses=excluded.max_uses, "
+            "expires_at=excluded.expires_at, active=1", (code, reward, max_uses, expires))
+        con.commit()
+    return jsonify({"ok": True})
 
 
 @app.post("/telegram-webhook" if not WEBHOOK_SECRET_PATH else "/telegram-webhook/" + WEBHOOK_SECRET_PATH)
