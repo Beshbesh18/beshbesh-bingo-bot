@@ -22,7 +22,7 @@ from urllib.parse import parse_qsl, quote
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 
-from flask import Flask, request, Response, jsonify
+from flask import Flask, request, Response, jsonify, send_from_directory
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo,
     ReplyKeyboardMarkup, KeyboardButton, BotCommand, MenuButtonCommands,
@@ -70,7 +70,9 @@ REFERRAL_REWARD = 10      # ETB the inviter gets when his invited NEW user makes
 SMS_SECRET = os.environ.get("SMS_SECRET", "").strip()
 SMS_SENDER = os.environ.get("SMS_SENDER", "").strip()  # optional: only accept SMS from this sender name/number
 RECEIPT_URL = "https://transactioninfo.ethiotelecom.et/receipt/"
-FINISHED_SECONDS = 10  # how long the "BINGO!" result stays on screen
+FINISHED_SECONDS = 4  # how long the "BINGO!" result stays on screen
+SUPPORT_USERNAME = os.environ.get("SUPPORT_USERNAME", "beshbesh08").strip().lstrip("@")
+VOICE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "voice")  # B1.mp3 ... O75.mp3
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -835,7 +837,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif msg in (t["language"], "\U0001f310 \u124b\u1295\u124b / Language", "\U0001f310 Language"):
         await language_command(update, context)
     elif msg in (t["support"], "\U0001f198 \u12f5\u130b\u134d", "\U0001f198 Help"):
-        await update.effective_message.reply_text("\U0001f198 \u12f5\u130b\u134d / Help\n\u1208\u12a5\u122d\u12f3\u1273 \u12a0\u1235\u1270\u12f3\u12f3\u122a\u12cd\u1295 \u12eb\u1290\u130b\u130d\u1229\u1362\nContact the administrator for support.")
+        await update.effective_message.reply_text(
+            "\U0001f198 \u12f5\u130b\u134d / Help\n\n\u12a0\u12f5\u121a\u1291\u1295 \u1208\u121b\u130d\u1298\u1275 / \u12f5\u130b\u134d \u1208\u121b\u130d\u1298\u1275\u1366 @%s\nContact the admin / get support: @%s"
+            % (SUPPORT_USERNAME, SUPPORT_USERNAME))
     else:
         await update.effective_message.reply_text(tr(user.id, "choose"), reply_markup=main_keyboard(user.id))
 
@@ -1565,12 +1569,12 @@ INDEX_HTML = r"""<!doctype html>
 <html lang="am"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="theme-color" content="#06180d"><title>&#x1260;&#x123D; &#x1260;&#x123D; &#x1262;&#x1295;&#x130E;</title><script src="https://telegram.org/js/telegram-web-app.js"></script><link rel="stylesheet" href="/static/style.css"></head>
 <body><main class="app-shell">
 <header class="topbar">
-  <div class="brand-info"><div class="eyebrow">&#x26A1; &#x1260;&#x123D; &#x1260;&#x123D; &#x1262;&#x1295;&#x130E; &#xB7; v10</div><h1 id="round-title">&#x12D9;&#x122D; #1</h1></div>
+  <div class="brand-info"><div class="eyebrow">&#x26A1; &#x1260;&#x123D; &#x1260;&#x123D; &#x1262;&#x1295;&#x130E; &#xB7; v11</div><h1 id="round-title">&#x12D9;&#x122D; #1</h1></div>
   <div class="top-scores">
     <div class="score-box"><span>PLAY</span><strong id="play-bal">0.00</strong></div>
     <div class="score-box win"><span>WIN</span><strong id="win-bal">0.00</strong></div>
     <button id="sound-btn" class="sound-btn" title="Sound">&#x1F50A;</button>
-    <div class="current-call-badge" id="current">&#x2014;</div>
+    <div class="current-call-badge" id="current">&#x2014;</div><div class="call-count" id="call-count"></div>
   </div>
 </header>
 
@@ -1642,7 +1646,7 @@ INDEX_HTML = r"""<!doctype html>
   <button class="nav-btn" id="nav-rules" onclick="openRules()">&#x1F4DC; &#x1205;&#x130D;</button>
 </nav>
 </main>
-<div id="win-overlay" class="win-overlay" style="display:none"><div class="win-box"><div class="win-title">&#x1F389; BINGO! &#x1F389;</div><div id="win-names" class="win-line"></div><div id="win-prize" class="win-line"></div><div id="win-next" class="win-sub"></div></div></div>
+<div id="win-overlay" class="win-overlay" style="display:none"><div class="win-box"><div class="win-title">&#x1F389; BINGO! &#x1F389;</div><div id="win-names" class="win-line"></div><div id="win-prize" class="win-line"></div><div id="win-call" class="win-line"></div><div id="win-next" class="win-sub"></div></div></div>
 <div id="rules-overlay" class="rules-overlay" style="display:none">
   <div class="rules-sheet">
     <div class="rules-head"><button id="rules-close" class="rules-close">&#x12DD;&#x130B;</button><div class="rules-title">&#x12E8;&#x1328;&#x12CB;&#x1273;&#x12CD; &#x1218;&#x1218;&#x122A;&#x12EB; &#x12A5;&#x1293; &#x12F0;&#x1295;&#x1265;</div></div>
@@ -1789,6 +1793,7 @@ input,select{width:100%;background:var(--panel2);border:1px solid var(--line);pa
 .rule-card .grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .rule-card label.d{display:inline-block;margin:2px 6px 2px 0;font-size:13px}
 .eth{color:var(--gold);font-size:12px}
+.call-count{text-align:center;font-size:12px;font-weight:800;color:var(--gold);margin-top:4px}
 .rule-card input[type=checkbox]{width:auto;min-width:0;height:auto;margin:0 4px;padding:0;vertical-align:middle}
 """
 
@@ -1848,12 +1853,32 @@ function unlockAudio() {
 ['pointerdown', 'touchstart', 'click'].forEach(ev =>
   document.addEventListener(ev, unlockAudio, { once: true, passive: true }));
 
+// The owner's own recorded voice (static/voice/B1.mp3 ... O75.mp3); falls back to the synthetic voice if a file is missing.
+const voiceCache = {};
+function voiceClip(key) {
+  let a = voiceCache[key];
+  if (!a) { a = new Audio('/static/voice/' + key + '.mp3'); a.preload = 'auto'; voiceCache[key] = a; }
+  return a;
+}
+function preloadVoices() {
+  for (let n = 1; n <= 75; n++) {
+    const key = LETTERS[Math.min(4, Math.floor((n - 1) / 15))] + n;
+    setTimeout(() => { try { voiceClip(key); } catch (e) {} }, n * 80);
+  }
+}
+setTimeout(preloadVoices, 2500);
 function speakNumber(n) {
   if (!n || n === lastSpokenNum) return;
   lastSpokenNum = n;
+  if (!soundOn) return;
   const letter = LETTERS[Math.min(4, Math.floor((n - 1) / 15))];
-  beep(880, 0.12, 0.2);                 // short "ding" so there is always a sound
-  speak(letter + ', ' + n);
+  const fallback = () => { beep(880, 0.12, 0.2); speak(letter + ', ' + n); };
+  try {
+    const a = voiceClip(letter + n);
+    a.currentTime = 0;
+    const p = a.play();
+    if (p && p.catch) p.catch(fallback);
+  } catch (e) { fallback(); }
 }
 function announceBingo() {
   [523, 659, 784, 1046].forEach((f, i) => setTimeout(() => beep(f, 0.18, 0.25), i * 150));
@@ -1891,6 +1916,8 @@ function render() {
     } else { bb.style.display = 'none'; }
   }
   document.getElementById('current').textContent = model.current_number ?? '\u2014';
+  const calls = (model.called_numbers || []).length;
+  document.getElementById('call-count').textContent = (model.phase === 'playing' || model.phase === 'finished') && calls ? ('\u1325\u122A ' + calls + '/75') : '';
 
   if (model.current_number) speakNumber(model.current_number);
   else lastSpokenNum = null;
@@ -1919,6 +1946,7 @@ function render() {
     if (announcedRound !== model.round) { announcedRound = model.round; announceBingo(); }
     document.getElementById('win-names').textContent = w.map(x => x.name + ' \u2014 \u12AB\u122D\u12F5 #' + x.card_id).join('\n');
     document.getElementById('win-prize').textContent = '\u123D\u120D\u121B\u1275: ' + (w[0] ? w[0].prize : 0) + ' \u1265\u122D' + (w.length > 1 ? ' (\u1208\u12A5\u12EB\u1295\u12F3\u1295\u12F3\u1278\u12CD)' : '');
+    document.getElementById('win-call').textContent = '\u1260 ' + (model.called_numbers || []).length + '\u129B \u1325\u122A \u1270\u12D8\u130B';
     document.getElementById('win-next').textContent = '\u12A0\u12F2\u1235 \u12D9\u122D \u1260 ' + rem + ' \u1230\u12A8\u1295\u12F5 \u12CD\u1235\u1325 \u12ED\u1300\u121D\u122B\u120D';
   } else {
     banner.style.display = 'none';
@@ -2297,6 +2325,15 @@ def no_cache(resp):
     return resp
 
 
+@app.route("/static/voice/<name>")
+def serve_voice(name):
+    """The owner's recorded number calls: B1.mp3 ... O75.mp3 in the static/voice folder next to this file."""
+    if not re.fullmatch(r"[BINGO]\d{1,2}\.mp3", name):
+        return Response("not found", status=404)
+    resp = send_from_directory(VOICE_DIR, name, mimetype="audio/mpeg", max_age=86400)
+    return resp
+
+
 @app.route("/static/style.css")
 def serve_css():
     return Response(STYLE_CSS, content_type="text/css; charset=utf-8")
@@ -2647,18 +2684,23 @@ def sms_webhook():
     if not text and not data and not request.form:
         text = request.get_data(as_text=True) or ""
     sender = pick("from", "sender", "address", "number")
+    as_json = request.args.get("json") == "1"   # some forwarder apps insist on the plain text reply "OK"
+
+    def done(payload):
+        return jsonify(payload) if as_json else Response("OK", content_type="text/plain; charset=utf-8")
+
     if SMS_SENDER and sender and sender.strip().lower() != SMS_SENDER.lower():
-        return jsonify({"ok": True, "ignored": "sender"})
+        return done({"ok": True, "ignored": "sender"})
     parsed = parse_telebirr_sms(text)
     if not parsed:
-        return jsonify({"ok": True, "ignored": "not an incoming Telebirr payment"})
+        return done({"ok": True, "ignored": "not an incoming Telebirr payment"})
     try:
         result = handle_incoming_sms(parsed)
     except Exception:
         logger.exception("sms webhook failed")
         return json_error("server error", 500)
     logger.info("incoming SMS payment %s -> %s", parsed["ref"], result)
-    return jsonify({"ok": True, "result": result})
+    return done({"ok": True, "result": result})
 
 
 @app.get("/api/admin/settings")
