@@ -56,6 +56,8 @@ HOUSE_PERCENT = 15   # owner's share of every round's prize pool (winners share 
 MIN_WITHDRAW = 100   # smallest withdrawal a player may ask for (ETB)
 MAX_PENDING_DEPOSITS = 5  # unreviewed deposit requests one player may have at the same time
 MAX_CARDS_PER_PLAYER = 4
+RANK_SIZE = 10      # how many players the Rank screen shows
+NEW_USER_DAYS = 7   # a claim bonus for 'new' users is open to accounts created in the last 7 days
 SELECTION_TIME_SECONDS = 50
 CALL_INTERVAL_SECONDS = 3
 MAX_NUMBERS_POOL = 75  # 1 to 75 numbers called in game
@@ -65,7 +67,8 @@ PAY_NUMBER = os.environ.get("PAY_NUMBER", "0928564065").strip()   # the owner's 
 PAY_NAME = os.environ.get("PAY_NAME", "Eineyew").strip()         # the name shown to players
 PAY_TAIL = re.sub(r"\D", "", PAY_NUMBER)[-4:]
 MIN_DEPOSIT = 20          # smallest deposit (ETB)
-REFERRAL_REWARD = 10      # ETB the inviter gets when his invited NEW user makes a first approved deposit
+REFERRAL_REWARD = 50      # ETB bonus (Play wallet) the inviter gets when an invited person's deposit is approved (editable in the admin panel)
+REFERRAL_MIN_DEPOSIT = 50  # smallest approved deposit of the invited person that pays the inviter (editable in the admin panel)
 # Secret for the phone's SMS-forwarding webhook (/api/sms-webhook). Without it the webhook is disabled.
 SMS_SECRET = os.environ.get("SMS_SECRET", "").strip()
 SMS_SENDER = os.environ.get("SMS_SENDER", "").strip()  # optional: only accept SMS from this sender name/number
@@ -220,6 +223,32 @@ def init_db():
             PRIMARY KEY (code, user_id)
         );
         """)
+        ucols2 = {r["name"] for r in con.execute("PRAGMA table_info(users)").fetchall()}
+        if "last_seen_at" not in ucols2:
+            con.execute("ALTER TABLE users ADD COLUMN last_seen_at TEXT")
+        con.executescript("""
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS claim_bonuses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL DEFAULT '',
+            amount REAL NOT NULL DEFAULT 0,
+            max_claims INTEGER NOT NULL DEFAULT 0,
+            claimed INTEGER NOT NULL DEFAULT 0,
+            audience TEXT NOT NULL DEFAULT 'all',
+            expires_at TEXT,
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS claim_bonus_uses (
+            bonus_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (bonus_id, user_id)
+        );
+        """)
         if fresh_rules:
             # Ethiopia time (UTC+3), standard clock. days: Monday=0 ... Sunday=6
             con.executemany(
@@ -306,7 +335,7 @@ def register_phone(user_id, phone):
         else:
             con.execute(
                 "UPDATE users SET phone=?, bonus_given=1, credits=credits+? WHERE user_id=?",
-                (phone, float(NEW_USER_BONUS), uid))
+                (phone, setting_con(con, "new_user_bonus"), uid))
             result = "bonus"
         con.commit()
         return result
@@ -321,6 +350,49 @@ def set_language(user_id, language):
 def get_language(user_id):
     row = get_user(user_id)
     return row["language"] if row else "am"
+
+
+# ---------------------- Editable settings (admin panel) ----------------------
+SETTING_DEFAULTS = {
+    "new_user_bonus": NEW_USER_BONUS,
+    "referral_reward": REFERRAL_REWARD,
+    "referral_min_deposit": REFERRAL_MIN_DEPOSIT,
+}
+
+
+def setting_con(con, key):
+    row = con.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
+    try:
+        return float(row["value"]) if row else float(SETTING_DEFAULTS[key])
+    except (TypeError, ValueError):
+        return float(SETTING_DEFAULTS[key])
+
+
+def get_setting(key):
+    with closing(db()) as con:
+        return setting_con(con, key)
+
+
+def set_setting(key, value):
+    with closing(db()) as con:
+        con.execute("INSERT INTO app_settings(key, value) VALUES(?,?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, repr(float(value))))
+        con.commit()
+
+
+def new_user_bonus_text():
+    return ("%.2f" % get_setting("new_user_bonus")).rstrip("0").rstrip(".")
+
+
+def card_ranking():
+    """Players ranked by the number of cards they played (finished rounds; refunded rounds and the admins
+    are left out). Returns [(user_id, cards)] best first; a tie is won by who started playing first."""
+    with closing(db()) as con:
+        rows = con.execute(
+            "SELECT rp.user_id AS uid, SUM(rp.cards) AS total FROM round_players rp "
+            "JOIN rounds r ON r.id=rp.round_id WHERE r.status!='refunded' "
+            "GROUP BY rp.user_id HAVING total>0 ORDER BY total DESC, MIN(rp.id) ASC").fetchall()
+    return [(int(r["uid"]), int(r["total"])) for r in rows if int(r["uid"]) not in ADMIN_IDS]
 
 
 init_db()
@@ -664,7 +736,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("\u1260\u123d \u1260\u123d \u1262\u1295\u130e \u26a1", reply_markup=main_keyboard(user.id))
     else:
         await update.effective_message.reply_text(
-            tr(user.id, "contact_ask", amount=NEW_USER_BONUS), reply_markup=main_keyboard(user.id))
+            tr(user.id, "contact_ask", amount=new_user_bonus_text()), reply_markup=main_keyboard(user.id))
 
 
 async def language_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -746,11 +818,12 @@ async def send_invite(update, context, uid):
         return
     link = "https://t.me/%s?start=ref_%d" % (username, uid)
     n, paid, earned = referral_stats(uid)
+    reward, min_dep = money(get_setting("referral_reward")), money(get_setting("referral_min_deposit"))
     text = L(uid,
-             "\U0001f517 \u130b\u1265\u12dd \u12a5\u1293 \u12a0\u130d\u129d\n\n\u12e8\u12a5\u122d\u1235\u12ce \u1218\u130b\u1260\u12e3 \u120a\u1295\u12ad:\n%s\n\n\u1313\u12f0\u129b\u12ce \u1260\u12da\u1205 \u120a\u1295\u12ad \u1308\u1265\u1276 \u12e8\u1218\u1300\u1218\u122a\u12eb \u1308\u1295\u12d8\u1261\u1295 \u1232\u12eb\u1235\u1308\u1263 \u12a5\u1293 \u1232\u1338\u12f5\u1245 "
-             "%d \u1265\u122d \u12c8\u12f0 \u1202\u1233\u1265\u12ce \u12ed\u1328\u1218\u122b\u120d\u1362\n\n\U0001f465 \u12e8\u130b\u1260\u12df\u1278\u12cd: %d\n\u2705 \u1308\u1295\u12d8\u1265 \u12eb\u1235\u1308\u1261: %d\n\U0001f4b0 \u12eb\u1308\u1299\u1275: %s \u1265\u122d" % (link, REFERRAL_REWARD, n, paid, money(earned)),
-             "\U0001f517 Invite & earn\n\nYour invite link:\n%s\n\nWhen a friend joins with this link and his first deposit is approved, "
-             "%d ETB is added to your balance.\n\n\U0001f465 Invited: %d\n\u2705 Deposited: %d\n\U0001f4b0 Earned: %s ETB" % (link, REFERRAL_REWARD, n, paid, money(earned)))
+             "\U0001f517 \u130b\u1265\u12dd \u12a5\u1293 \u12a0\u130d\u129d\n\n\u12e8\u12a5\u122d\u1235\u12ce \u1218\u130b\u1260\u12e3 \u120a\u1295\u12ad:\n%s\n\n\u1313\u12f0\u129b\u12ce \u1260\u12da\u1205 \u120a\u1295\u12ad \u1308\u1265\u1276 \u1262\u12eb\u1295\u1235 %s \u1265\u122d \u1308\u1295\u12d8\u1265 \u12a0\u1235\u1308\u1265\u1276 \u12ad\u134d\u12eb\u12cd \u1232\u1338\u12f5\u1245 "
+             "%s \u1265\u122d \u1266\u1290\u1235 \u12c8\u12f0 \u1218\u132b\u12c8\u127b \u1202\u1233\u1265\u12ce \u12ed\u1328\u1218\u122b\u120d\u1362\n\n\U0001f465 \u12e8\u130b\u1260\u12df\u1278\u12cd: %d\n\u2705 \u1308\u1295\u12d8\u1265 \u12eb\u1235\u1308\u1261: %d\n\U0001f4b0 \u12eb\u1308\u1299\u1275: %s \u1265\u122d" % (link, min_dep, reward, n, paid, money(earned)),
+             "\U0001f517 Invite & earn\n\nYour invite link:\n%s\n\nWhen a friend joins with this link and a deposit of at least %s ETB is approved, "
+             "a %s ETB bonus is added to your Play wallet.\n\n\U0001f465 Invited: %d\n\u2705 Deposited: %d\n\U0001f4b0 Earned: %s ETB" % (link, min_dep, reward, n, paid, money(earned)))
     share = "https://t.me/share/url?url=%s&text=%s" % (quote(link), quote(L(uid, "\u1260\u123d \u1260\u123d \u1262\u1295\u130e - \u1270\u132b\u12cd\u1270\u12cd \u12eb\u1238\u1295\u1349! \U0001f3b0", "Besh Besh Bingo - play and win! \U0001f3b0")))
     await update.effective_message.reply_text(
         text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(L(uid, "\U0001f4e4 \u1208\u1313\u12f0\u129b \u12a0\u130b\u122b", "\U0001f4e4 Share"), url=share)]]))
@@ -825,14 +898,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif msg == t["invite"]:
         await send_invite(update, context, user.id)
     elif msg in (t["rank"], "\U0001f3c6 \u12f0\u1228\u1303", "\U0001f3c6 Rank"):
-        with closing(db()) as con:
-            rows = con.execute(
-                "SELECT username, first_name, win_credits FROM users ORDER BY win_credits DESC LIMIT 10"
-            ).fetchall()
-        lines = ["\U0001f3c6 \u12a8\u134d\u1270\u129b \u1270\u132b\u12cb\u127e\u127d (Top Players)"]
-        for i, r in enumerate(rows, 1):
-            name = ("@" + r["username"]) if r["username"] else (r["first_name"] or "Player")
-            lines.append(f"{i}. {name} \u2014 {r['win_credits']} ETB")
+        ranking = await asyncio.get_running_loop().run_in_executor(None, card_ranking)
+        lines = [L(user.id, "\U0001f3c6 \u12a8\u134d\u1270\u129b 10 \u1270\u132b\u12cb\u127e\u127d (\u1260\u12ab\u122d\u12f5 \u1265\u12db\u1275)", "\U0001f3c6 Top 10 players (by number of cards)")]
+        for i, (ruid, cards) in enumerate(ranking[:RANK_SIZE], 1):
+            lines.append(L(user.id, "%d. %s \u2014 %d \u12ab\u122d\u12f6\u127d", "%d. %s \u2014 %d cards") % (i, display_name(ruid), cards))
+        if len(lines) == 1:
+            lines.append(L(user.id, "\u1308\u1293 \u121b\u1295\u121d \u12a0\u120d\u1270\u132b\u12c8\u1270\u121d\u1362", "Nobody has played yet."))
+        mine = next(((i, c) for i, (ruid, c) in enumerate(ranking, 1) if ruid == user.id), None)
+        if mine:
+            lines.append("")
+            lines.append(L(user.id, "\u12e8\u12a5\u122d\u1235\u12ce \u12f0\u1228\u1303: %d (%d \u12ab\u122d\u12f6\u127d)", "Your rank: %d (%d cards)") % mine)
         await update.effective_message.reply_text("\n".join(lines))
     elif msg in (t["language"], "\U0001f310 \u124b\u1295\u124b / Language", "\U0001f310 Language"):
         await language_command(update, context)
@@ -957,7 +1032,7 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         key = "contact_saved"
     await update.effective_message.reply_text(
-        tr(user.id, key, amount=NEW_USER_BONUS), reply_markup=main_keyboard(user.id))
+        tr(user.id, key, amount=new_user_bonus_text()), reply_markup=main_keyboard(user.id))
 
 
 async def handle_review_button(query, data, admin_id):
@@ -1007,6 +1082,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("\U0001f6ab Unauthorized", show_alert=True)
             return
         await handle_review_button(query, data, user_id)
+        return
+    if data.startswith("cb:"):
+        ensure_user(user_id, query.from_user.username, query.from_user.first_name)
+        result, amount = await asyncio.get_running_loop().run_in_executor(None, claim_bonus, user_id, data[3:])
+        await query.answer(claim_message(user_id, result, amount), show_alert=True)
         return
     await query.answer()
     ensure_user(user_id, query.from_user.username, query.from_user.first_name)
@@ -1351,12 +1431,10 @@ def approve_deposit(req_id, reviewer_id, via="admin", amount=None, paid_at=None)
             con.execute("UPDATE incoming_payments SET used_by_req=? WHERE ref=?", (req_id, ref))
         u = con.execute("SELECT referred_by, referral_paid FROM users WHERE user_id=?", (uid,)).fetchone()
         if u and u["referred_by"] and not u["referral_paid"]:
-            earlier = con.execute(
-                "SELECT COUNT(*) FROM deposit_requests WHERE user_id=? AND status='approved' AND id!=?",
-                (uid, req_id)).fetchone()[0]
             exists = con.execute("SELECT 1 FROM users WHERE user_id=?", (u["referred_by"],)).fetchone()
-            if earlier == 0 and exists:
-                inviter, ref_reward = int(u["referred_by"]), float(REFERRAL_REWARD)
+            reward_now = setting_con(con, "referral_reward")
+            if exists and reward_now > 0 and amt >= setting_con(con, "referral_min_deposit"):
+                inviter, ref_reward = int(u["referred_by"]), float(reward_now)
                 con.execute("UPDATE users SET credits=credits+? WHERE user_id=?", (ref_reward, inviter))
                 con.execute("UPDATE users SET referral_paid=? WHERE user_id=?", (ref_reward, uid))
         con.commit()
@@ -1514,6 +1592,105 @@ def promo_message(uid, result, reward):
     }.get(result, L(uid, "\u274c \u12ae\u12f1 \u1275\u12ad\u12ad\u120d \u12a0\u12ed\u12f0\u1208\u121d\u1362 \u12a5\u1263\u12ad\u12ce \u12a5\u1295\u12f0\u1308\u1293 \u12ed\u121e\u12ad\u1229\u1362", "\u274c Invalid code. Please try again."))
 
 
+# ---------------- claim bonuses (created by the admin, "first N people") ----------------
+def claim_bonus(uid, bid):
+    """A player claims a bonus. Returns (result, amount): ok | invalid | closed | expired | full | already |
+    need_phone | new_only. The count and the payment happen in one locked transaction."""
+    uid = int(uid)
+    try:
+        bid = int(bid)
+    except (TypeError, ValueError):
+        return "invalid", 0
+    with closing(db()) as con:
+        con.execute("BEGIN IMMEDIATE")
+        b = con.execute("SELECT * FROM claim_bonuses WHERE id=?", (bid,)).fetchone()
+        u = con.execute("SELECT phone, created_at FROM users WHERE user_id=?", (uid,)).fetchone()
+        if b is None or u is None:
+            con.rollback()
+            return "invalid", 0
+        problem = None
+        if not b["active"]:
+            problem = "closed"
+        elif b["expires_at"] and b["expires_at"] < fmt_db(utc_now()):
+            problem = "expired"
+        elif b["max_claims"] and b["claimed"] >= b["max_claims"]:
+            problem = "full"
+        elif con.execute("SELECT 1 FROM claim_bonus_uses WHERE bonus_id=? AND user_id=?", (bid, uid)).fetchone():
+            problem = "already"
+        elif not u["phone"]:
+            problem = "need_phone"
+        elif b["audience"] == "new" and utc_now() - parse_db_time(u["created_at"]) > timedelta(days=NEW_USER_DAYS):
+            problem = "new_only"
+        if problem:
+            con.rollback()
+            return problem, 0
+        con.execute("INSERT INTO claim_bonus_uses(bonus_id, user_id) VALUES(?,?)", (bid, uid))
+        con.execute("UPDATE claim_bonuses SET claimed=claimed+1 WHERE id=?", (bid,))
+        con.execute("UPDATE users SET credits=credits+? WHERE user_id=?", (float(b["amount"]), uid))
+        con.commit()
+        return "ok", float(b["amount"])
+
+
+def claim_message(uid, result, amount):
+    if result == "ok":
+        return L(uid, "\U0001f389 \u1270\u1233\u12ad\u1277\u120d! %s \u1265\u122d \u1266\u1290\u1235 \u12c8\u12f0 \u1218\u132b\u12c8\u127b \u1202\u1233\u1265\u12ce \u1270\u1328\u121d\u122f\u120d\u1362" % money(amount),
+                 "\U0001f389 Done! A %s ETB bonus was added to your Play wallet." % money(amount))
+    return {
+        "full": L(uid, "\U0001f614 \u12ed\u1245\u122d\u1273\u1363 \u12ed\u1205 \u1266\u1290\u1235 \u1219\u1209 \u1260\u1219\u1209 \u1270\u12c8\u1235\u12f7\u120d\u1362", "\U0001f614 Sorry, this bonus has been fully claimed."),
+        "already": L(uid, "\u2139\ufe0f \u12ed\u1205\u1295 \u1266\u1290\u1235 \u1240\u12f5\u1218\u12cd \u12c8\u1235\u12f0\u12cb\u120d\u1362", "\u2139\ufe0f You already claimed this bonus."),
+        "expired": L(uid, "\u231b \u12ed\u1205 \u1266\u1290\u1235 \u12a0\u1265\u1245\u1277\u120d\u1362", "\u231b This bonus has ended."),
+        "closed": L(uid, "\u231b \u12ed\u1205 \u1266\u1290\u1235 \u12a0\u1265\u1245\u1277\u120d\u1362", "\u231b This bonus has ended."),
+        "need_phone": L(uid, "\U0001f4f1 \u1266\u1290\u1231\u1295 \u1208\u1218\u12cd\u1230\u12f5 \u1218\u1300\u1218\u122a\u12eb \u1260\u1266\u1271 \u12cd\u1235\u1325 \u1235\u120d\u12ad \u1241\u1325\u122d\u12ce\u1295 \u12eb\u130b\u1229\u1362",
+                        "\U0001f4f1 Share your phone number in the bot first to claim this bonus."),
+        "new_only": L(uid, "\u2139\ufe0f \u12ed\u1205 \u1266\u1290\u1235 \u1208\u12a0\u12f2\u1235 \u1270\u1320\u1243\u121a\u12ce\u127d \u1265\u127b \u1290\u12cd\u1362", "\u2139\ufe0f This bonus is for new players only."),
+    }.get(result, L(uid, "\u274c \u1266\u1290\u1231 \u12a0\u120d\u1270\u1308\u1298\u121d\u1362", "\u274c Bonus not found."))
+
+
+def claimable_bonuses(uid):
+    """Claim bonuses the Mini App shows to this player."""
+    uid = int(uid)
+    now = fmt_db(utc_now())
+    out = []
+    with closing(db()) as con:
+        u = con.execute("SELECT created_at FROM users WHERE user_id=?", (uid,)).fetchone()
+        mine = {r[0] for r in con.execute("SELECT bonus_id FROM claim_bonus_uses WHERE user_id=?", (uid,)).fetchall()}
+        for b in con.execute("SELECT * FROM claim_bonuses WHERE active=1 ORDER BY id DESC LIMIT 20").fetchall():
+            if b["expires_at"] and b["expires_at"] < now:
+                continue
+            claimed = b["id"] in mine
+            if b["max_claims"] and b["claimed"] >= b["max_claims"] and not claimed:
+                continue
+            eligible = True
+            if b["audience"] == "new":
+                eligible = bool(u) and utc_now() - parse_db_time(u["created_at"]) <= timedelta(days=NEW_USER_DAYS)
+            out.append({"id": b["id"], "name": b["name"], "amount": b["amount"], "claimed": claimed,
+                        "left": (max(0, b["max_claims"] - b["claimed"]) if b["max_claims"] else None),
+                        "audience": b["audience"], "eligible": eligible})
+    return out
+
+
+def broadcast_claim_bonus(bid):
+    """Send the 'claim' message with its button to every player (runs in its own thread)."""
+    try:
+        with closing(db()) as con:
+            b = con.execute("SELECT * FROM claim_bonuses WHERE id=?", (bid,)).fetchone()
+        if b is None:
+            return
+        ids = announce_recipients("all")
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton("\U0001f381 \u1266\u1290\u1231\u1295 \u12cd\u1230\u12f5 / Claim", callback_data="cb:%d" % bid)]])
+        limit_am = (" \u1208\u1218\u1300\u1218\u122a\u12eb\u12ce\u1279 %d \u1230\u12ce\u127d" % b["max_claims"]) if b["max_claims"] else ""
+        limit_en = (" for the first %d people" % b["max_claims"]) if b["max_claims"] else ""
+        for uid in ids:
+            text = L(uid,
+                     "\U0001f381 %s\n\n%s \u1265\u122d \u1266\u1290\u1235%s!\n\u12a8\u1273\u127d \u12eb\u1208\u12cd\u1295 \u1241\u120d\u134d \u12ed\u132b\u1291\u1362 \u1240\u12f5\u1218\u12cd \u1208\u121a\u12c8\u1235\u12f1 \u1265\u127b \u1290\u12cd\u1362" % (b["name"], money(b["amount"]), limit_am),
+                     "\U0001f381 %s\n\nA %s ETB bonus%s!\nTap the button below. First come, first served." % (b["name"], money(b["amount"]), limit_en))
+            send_to_chat(uid, text, markup)
+            time.sleep(0.06)   # stay below Telegram's ~30 messages per second
+        notify_admins("\U0001f4e3 \u12e8\u12ad\u120a\u121d \u1266\u1290\u1235 \"%s\" \u1208%d \u1230\u12ce\u127d \u1270\u120d\u12b3\u120d\u1362" % (b["name"], len(ids)))
+    except Exception:
+        logger.exception("could not broadcast the claim bonus")
+
+
 # ---------------- referral ----------------
 def set_referrer(uid, inviter_raw):
     try:
@@ -1569,7 +1746,7 @@ INDEX_HTML = r"""<!doctype html>
 <html lang="am"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="theme-color" content="#06180d"><title>&#x1260;&#x123D; &#x1260;&#x123D; &#x1262;&#x1295;&#x130E;</title><script src="https://telegram.org/js/telegram-web-app.js"></script><link rel="stylesheet" href="/static/style.css"></head>
 <body><main class="app-shell">
 <header class="topbar">
-  <div class="brand-info"><div class="eyebrow">&#x26A1; &#x1260;&#x123D; &#x1260;&#x123D; &#x1262;&#x1295;&#x130E; &#xB7; v11</div><h1 id="round-title">&#x12D9;&#x122D; #1</h1></div>
+  <div class="brand-info"><div class="eyebrow">&#x26A1; &#x1260;&#x123D; &#x1260;&#x123D; &#x1262;&#x1295;&#x130E; &#xB7; v12</div><h1 id="round-title">&#x12D9;&#x122D; #1</h1></div>
   <div class="top-scores">
     <div class="score-box"><span>PLAY</span><strong id="play-bal">0.00</strong></div>
     <div class="score-box win"><span>WIN</span><strong id="win-bal">0.00</strong></div>
@@ -1605,6 +1782,7 @@ INDEX_HTML = r"""<!doctype html>
 
 <div class="wallet-section" id="wallet-section" style="display:none;">
   <h2>&#x1F4B3; &#x12AA;&#x1235; &#x1266;&#x122D;&#x1233; &#x12A5;&#x1293; &#x12AD;&#x134D;&#x12EB;</h2>
+  <div id="claim-box"></div>
   <div class="balance-display-box">
     <div>PLAY WALLET: <strong id="w-play">0.00</strong> ETB</div>
     <div>WIN WALLET: <strong id="w-win">0.00</strong> ETB</div>
@@ -1635,8 +1813,10 @@ INDEX_HTML = r"""<!doctype html>
 </div>
 
 <div class="rank-section" id="rank-section" style="display:none;">
-  <h2>&#x1F3C6; &#x12A8;&#x134D;&#x1270;&#x129B; &#x1270;&#x132B;&#x12CB;&#x127E;&#x127D;</h2>
+  <h2>&#x1F3C6; &#x12A8;&#x134D;&#x1270;&#x129B; 10 &#x1270;&#x132B;&#x12CB;&#x127E;&#x127D;</h2>
+  <div class="rank-sub">&#x1260;&#x1270;&#x132B;&#x12C8;&#x1271;&#x1275; &#x12E8;&#x12AB;&#x122D;&#x12F5; &#x1265;&#x12DB;&#x1275;</div>
   <div id="rank-list">&#x1260;&#x1218;&#x132B;&#x1295; &#x120B;&#x12ED;...</div>
+  <div class="rank-me" id="rank-me"></div>
 </div>
 
 <nav class="bottom-nav">
@@ -1696,10 +1876,23 @@ ADMIN_HTML = r"""<!doctype html><html lang="am"><head><meta charset="utf-8"><met
   <div class="req"><span>&#x1260;&#x1218;&#x1320;&#x1263;&#x1260;&#x1245; &#x120B;&#x12ED;</span><strong id="p-count">&#x2014;</strong></div>
 </section>
 <h2>&#x1F534; &#x12A0;&#x1201;&#x1295; &#x1260;&#x1328;&#x12CB;&#x1273; &#x120B;&#x12ED;</h2><div class="req" id="live-box">&#x1260;&#x1218;&#x132B;&#x1295; &#x120B;&#x12ED;...</div>
+<h2>&#x1F465; &#x1270;&#x132B;&#x12CB;&#x127E;&#x127D;</h2>
+<div class="req"><div id="pl-sum">...</div><div class="grid2" style="margin-top:8px"><input type="text" id="pl-q" placeholder="&#x1235;&#x121D;&#x1363; ID &#x12C8;&#x12ED;&#x121D; &#x1235;&#x120D;&#x12AD; &#x1348;&#x120D;&#x130D;"><select id="pl-f"><option value="all">&#x1201;&#x1209;&#x121D;</option><option value="playing">&#x12A0;&#x1201;&#x1295; &#x1260;&#x1328;&#x12CB;&#x1273; &#x120B;&#x12ED;</option><option value="online">&#x12A6;&#x1295;&#x120B;&#x12ED;&#x1295;</option><option value="active">&#x1263;&#x1208;&#x1349;&#x1275; 24 &#x1230;&#x12D3;&#x1275; &#x12A0;&#x12AD;&#x1272;&#x126D;</option><option value="balance">&#x1265;&#x122D; &#x12EB;&#x120B;&#x1278;&#x12CD;</option></select></div></div>
+<div id="pl-list">&#x1260;&#x1218;&#x132B;&#x1295; &#x120B;&#x12ED;...</div>
 <h2>&#x1F4CA; &#x1235;&#x1273;&#x1272;&#x1235;&#x1272;&#x12AD;&#x1235;</h2><div class="stat-grid" id="stats-box"></div>
 <h2>&#x1F558; &#x12E8;&#x130C;&#x121D; &#x1202;&#x1235;&#x1275;&#x122A;</h2><div id="hist-list">&#x1260;&#x1218;&#x132B;&#x1295; &#x120B;&#x12ED;...</div>
 <h2>&#x12E8;&#x1308;&#x1295;&#x12D8;&#x1265; &#x121B;&#x1235;&#x1308;&#x1262;&#x12EB; &#x1325;&#x12EB;&#x1244;&#x12CE;&#x127D;</h2><div id="req-list">&#x1260;&#x1218;&#x132B;&#x1295; &#x120B;&#x12ED;...</div><h2>&#x12E8;&#x121B;&#x12CD;&#x1323;&#x1275; &#x1325;&#x12EB;&#x1244;&#x12CE;&#x127D;</h2><div id="wd-list">&#x1260;&#x1218;&#x132B;&#x1295; &#x120B;&#x12ED;...</div><h2>&#x1F4F2; SMS &#x122B;&#x1235;-&#x121B;&#x133D;&#x12F0;&#x1245;</h2><div class="req" id="sms-box">...</div>
 <h2>&#x1F381; &#x12E8;&#x1266;&#x1290;&#x1235; &#x1205;&#x130E;&#x127D; (&#x12E8;&#x12A2;&#x1275;&#x12EE;&#x1335;&#x12EB; &#x1230;&#x12D3;&#x1275;)</h2><div id="rules-box"></div><button id="add-rule" class="primary-btn">&#x2795; &#x12A0;&#x12F2;&#x1235; &#x1205;&#x130D;</button>
+<h2>&#x2699;&#xFE0F; &#x12E8;&#x1266;&#x1290;&#x1235; &#x1245;&#x1295;&#x1265;&#x122D;</h2>
+<div class="rule-card"><div class="grid2"><div>&#x12A0;&#x12F2;&#x1235; &#x1270;&#x1320;&#x1243;&#x121A; &#x1266;&#x1290;&#x1235; (&#x1265;&#x122D;)<input type="number" id="st-nub"></div><div>&#x1218;&#x130B;&#x1260;&#x12E3; &#x1266;&#x1290;&#x1235; (&#x1265;&#x122D;)<input type="number" id="st-rr"></div></div>
+<div>&#x1218;&#x130B;&#x1260;&#x12E3; &#x1266;&#x1290;&#x1235; &#x12E8;&#x121A;&#x12A8;&#x1348;&#x1208;&#x12CD;&#x1363; &#x12E8;&#x1270;&#x130B;&#x1260;&#x12D8;&#x12CD; &#x1230;&#x12CD; &#x1262;&#x12EB;&#x1295;&#x1235; &#x12E8;&#x121A;&#x12EB;&#x1235;&#x1308;&#x1263;&#x12CD; &#x1265;&#x122D;<input type="number" id="st-rmd"></div>
+<button id="st-save" class="primary-btn">&#x1F4BE; &#x12A0;&#x1235;&#x1240;&#x121D;&#x1325;</button></div>
+<h2>&#x1F381; &#x12E8;&#x12AD;&#x120A;&#x121D; &#x1266;&#x1290;&#x1236;&#x127D; (&#x1208;&#x1218;&#x1300;&#x1218;&#x122A;&#x12EB;&#x12CE;&#x1279; N &#x1230;&#x12CE;&#x127D;)</h2>
+<div class="rule-card"><div class="grid2"><input type="text" id="cb-name" placeholder="&#x1235;&#x121D; (&#x1208;&#x121D;&#x1233;&#x120C; &#x12E8;&#x12DB;&#x122C; &#x1266;&#x1290;&#x1235;)"><input type="number" id="cb-amount" placeholder="&#x1266;&#x1290;&#x1235; (&#x1265;&#x122D;)"></div>
+<div class="grid2"><input type="number" id="cb-max" placeholder="&#x1208;&#x1235;&#x1295;&#x1275; &#x1230;&#x12CD; (0 = &#x12EB;&#x120D;&#x1270;&#x12C8;&#x1230;&#x1290;)"><select id="cb-aud"><option value="all">&#x1208;&#x1201;&#x1209;&#x121D; &#x1270;&#x132B;&#x12CB;&#x127D;</option><option value="new">&#x1208;&#x12A0;&#x12F2;&#x1235; &#x1270;&#x1320;&#x1243;&#x121A; &#x1265;&#x127B; (7 &#x1240;&#x1295;)</option></select></div>
+<div><input type="date" id="cb-exp" title="&#x12E8;&#x121A;&#x12EB;&#x1260;&#x1243;&#x1260;&#x1275; &#x1240;&#x1295;"></div>
+<label><input type="checkbox" id="cb-ann" checked> &#x1208;&#x1201;&#x1209;&#x121D; &#x1270;&#x132B;&#x12CB;&#x127D; &#x1260;&#x1266;&#x1271; &#x1218;&#x120D;&#x12A5;&#x12AD;&#x1275; &#x120B;&#x12AD; (&#x1266;&#x1290;&#x1235; &#x12CD;&#x1230;&#x12F5; &#x1241;&#x120D;&#x134D; &#x12EB;&#x1208;&#x12CD;)</label>
+<button id="cb-save" class="primary-btn">&#x1F381; &#x1266;&#x1290;&#x1231;&#x1295; &#x134D;&#x1320;&#x122D;</button></div><div id="claim-list"></div>
 <h2>&#x1F3F7; &#x1355;&#x122E;&#x121E; &#x12AE;&#x12F6;&#x127D;</h2>
 <div class="rule-card"><div class="grid2"><input type="text" id="pc-code" placeholder="&#x12AE;&#x12F5;"><input type="number" id="pc-reward" placeholder="&#x123D;&#x120D;&#x121B;&#x1275; (&#x1265;&#x122D;)"></div>
 <div class="grid2"><input type="number" id="pc-max" placeholder="&#x12A8;&#x134D;&#x1270;&#x129B; &#x1270;&#x1320;&#x1243;&#x121A; &#x1265;&#x12DB;&#x1275; (0 = &#x12EB;&#x120D;&#x1270;&#x12C8;&#x1230;&#x1290;)"><input type="date" id="pc-exp" title="&#x12E8;&#x121A;&#x12EB;&#x1260;&#x1243;&#x1260;&#x1275; &#x1240;&#x1295;"></div>
@@ -1784,6 +1977,24 @@ input,select{width:100%;background:var(--panel2);border:1px solid var(--line);pa
 .pat-cell{aspect-ratio:1;background:#12301c;border-radius:3px}
 .pat-cell.on{background:var(--teal);box-shadow:0 0 6px #39d66f99}
 .rules-ok{margin:10px 12px 14px;padding:14px;border:0;border-radius:12px;background:linear-gradient(135deg,#39d66f,#1fa44f);color:#041509;font-weight:900;font-size:15px;cursor:pointer}
+.rank-sub{color:var(--muted);font-size:12px;margin:-4px 0 10px}
+.podium{display:grid;grid-template-columns:1fr 1.15fr 1fr;gap:8px;align-items:end;margin:26px 0 14px}
+.pod{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:12px 6px 10px;text-align:center}
+.pod.p1{border-color:var(--gold);box-shadow:0 0 14px rgba(255,230,41,.25);padding-top:18px;padding-bottom:16px}
+.pod .medal{width:26px;height:26px;border-radius:50%;background:#7e8a82;color:#041509;font-weight:900;font-size:13px;display:flex;align-items:center;justify-content:center;margin:-25px auto 6px}
+.pod.p1 .medal{background:var(--gold)}
+.pod.p3 .medal{background:#d98e4a}
+.pod .nm{font-size:12px;font-weight:800;word-break:break-word}
+.pod .ct{font-size:11px;color:var(--gold);margin-top:3px;font-weight:700}
+.rank-row{display:flex;align-items:center;gap:10px;background:var(--panel2);border:1px solid var(--line);border-left:3px solid var(--teal);border-radius:10px;padding:10px;margin-bottom:8px;font-size:13px}
+.rank-row .no{width:24px;height:24px;border-radius:50%;border:1px solid var(--teal);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:800;flex:none}
+.rank-row .nm{flex:1;font-weight:700;word-break:break-word}
+.rank-row .ct{color:var(--teal);font-weight:800;font-size:12px;white-space:nowrap}
+.rank-me{display:flex;justify-content:space-between;align-items:center;border:1px solid var(--gold);border-radius:12px;padding:12px;margin-top:10px;font-weight:800;font-size:13px;color:var(--gold)}
+.claim-card{display:flex;align-items:center;justify-content:space-between;gap:10px;background:var(--panel2);border:1px solid var(--gold);border-radius:12px;padding:10px 12px;margin-bottom:10px}
+.claim-card b{display:block;font-size:14px}.claim-card span{font-size:12px;color:var(--muted)}
+.claim-card button{border:0;border-radius:10px;padding:10px 14px;font-weight:900;background:var(--gold);color:#041509;cursor:pointer;white-space:nowrap}
+.claim-card button:disabled{background:#3a4a40;color:#a3b8a8;cursor:default}
 .pay-box{background:#06180d;border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin:8px 0;line-height:1.7;font-size:14px}
 .pay-box b{color:var(--gold);letter-spacing:.5px}
 .copy-btn{margin-left:8px;border:0;border-radius:6px;padding:3px 10px;background:var(--teal);color:#041509;font-weight:800;cursor:pointer}
@@ -2049,20 +2260,61 @@ window.switchTab = function (t) {
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === t));
   render();
   if (t === 'rank') loadRank();
+  if (t === 'wallet') loadBonuses();
 };
 
 async function loadRank() {
   try {
     const d = await api('/api/miniapp/rank');
     const list = document.getElementById('rank-list'); list.innerHTML = '';
-    d.rows.forEach((r, i) => {
-      const div = document.createElement('div');
-      div.style.cssText = 'padding:6px;border-bottom:1px solid #20552d';
-      div.append((i + 1) + '. ' + r.name + ' \u2014 ');
-      const b = document.createElement('b'); b.textContent = r.credits + ' ETB';
-      div.appendChild(b); list.appendChild(div);
-    });
+    const rows = d.rows || [];
+    if (!rows.length) {
+      list.textContent = '\u1308\u1293 \u121B\u1295\u121D \u12A0\u120D\u1270\u132B\u12C8\u1270\u121D';
+    } else {
+      const pod = document.createElement('div'); pod.className = 'podium';
+      [1, 0, 2].forEach(i => {
+        const r = rows[i];
+        if (!r) { pod.appendChild(document.createElement('div')); return; }
+        const p = document.createElement('div'); p.className = 'pod p' + (i + 1);
+        const m = document.createElement('div'); m.className = 'medal'; m.textContent = String(i + 1);
+        const n = document.createElement('div'); n.className = 'nm'; n.textContent = r.name;
+        const c = document.createElement('div'); c.className = 'ct'; c.textContent = r.cards + ' \u12AB\u122D\u12F6\u127D';
+        p.append(m, n, c); pod.appendChild(p);
+      });
+      list.appendChild(pod);
+      rows.slice(3).forEach((r, k) => {
+        const row = document.createElement('div'); row.className = 'rank-row';
+        const no = document.createElement('div'); no.className = 'no'; no.textContent = String(k + 4);
+        const n = document.createElement('div'); n.className = 'nm'; n.textContent = r.name;
+        const c = document.createElement('div'); c.className = 'ct'; c.textContent = r.cards + ' \u12AB\u122D\u12F6\u127D';
+        row.append(no, n, c); list.appendChild(row);
+      });
+    }
+    const me = document.getElementById('rank-me'); me.innerHTML = '';
+    const a = document.createElement('span'); a.textContent = '\u12E8\u12A5\u122D\u1235\u12CE \u12F0\u1228\u1303: ' + (d.me ? ('#' + d.me.rank) : '\u2014');
+    const b = document.createElement('span'); b.textContent = (d.me ? d.me.cards : 0) + ' \u12AB\u122D\u12F6\u127D';
+    me.append(a, b);
   } catch (e) { toast(e.message); }
+}
+
+async function loadBonuses() {
+  const box = document.getElementById('claim-box'); if (!box) return;
+  try {
+    const d = await api('/api/miniapp/bonuses');
+    box.innerHTML = '';
+    (d.bonuses || []).forEach(b => {
+      const card = document.createElement('div'); card.className = 'claim-card';
+      const info = document.createElement('div');
+      const t = document.createElement('b'); t.textContent = '\uD83C\uDF81 ' + b.name + ' \u2014 ' + b.amount + ' \u1265\u122D';
+      const s = document.createElement('span'); s.textContent = (b.left !== null && b.left !== undefined) ? ('\u12E8\u1240\u1229: ' + b.left) : '\u1208\u1201\u1209\u121D';
+      info.append(t, s);
+      const btn = document.createElement('button');
+      btn.textContent = b.claimed ? '\u2705 \u12C8\u1235\u12F0\u12CB\u120D' : (b.eligible ? '\u12CD\u1230\u12F5' : '\u1208\u12A0\u12F2\u1235 \u1265\u127B');
+      btn.disabled = !!b.claimed || !b.eligible;
+      btn.onclick = async () => { await action('/api/miniapp/claim-bonus', { id: b.id }); loadBonuses(); };
+      card.append(info, btn); box.appendChild(card);
+    });
+  } catch (e) {}
 }
 
 document.getElementById('claim').onclick = () => action('/api/miniapp/claim');
@@ -2130,8 +2382,7 @@ function closeRules(markSeen) {
 }
 document.getElementById('rules-close').onclick = () => closeRules(false);
 document.getElementById('rules-ok').onclick = () => closeRules(true);
-// show the rules once on the first visit (only when the browser can remember that it was shown)
-try { if (!localStorage.getItem('bb_rules_v1')) openRules(); } catch (e) {}
+// the rules open only when the player taps the rules button (no automatic popup)
 
 refresh(); setInterval(refresh, 1000);
 })();"""
@@ -2299,7 +2550,7 @@ function renderSms(s, incoming) {
 }
 function renderRefs(r) {
   document.getElementById('ref-box').innerHTML =
-    `<div class="req"><p>\u123D\u120D\u121B\u1275: ${birr(r.reward)} \u1265\u122D (\u1208\u121A\u130B\u1265\u12D8\u12CD\u1363 \u12E8\u1270\u130B\u1263\u12E1 \u12E8\u1218\u1300\u1218\u122A\u12EB \u1308\u1295\u12D8\u1265 \u1232\u1338\u12F5\u1245)</p><b>\u12A8\u134D\u1270\u129B \u130B\u1263\u12E6\u127D</b>` +
+    `<div class="req"><p>\u123D\u120D\u121B\u1275: ${birr(r.reward)} \u1265\u122D \u1266\u1290\u1235 (\u1208\u121A\u130B\u1265\u12D8\u12CD\u1363 \u12E8\u1270\u130B\u1260\u12D8\u12CD \u1230\u12CD \u1262\u12EB\u1295\u1235 ${birr(r.min_deposit)} \u1265\u122D \u1232\u12EB\u1235\u1308\u1263)</p><b>\u12A8\u134D\u1270\u129B \u130B\u1263\u12E6\u127D</b>` +
     (r.top.map(t => `<div class="pl">${esc(t.name)} (ID ${esc(t.inviter)}) \u2014 ${Number(t.invited)} \u130B\u1265\u12DF\u120D \u00B7 ${Number(t.paid)} \u12EB\u1235\u1308\u1261 \u00B7 ${birr(t.earned)} \u1265\u122D</div>`).join('') || '<p>\u2014</p>') +
     `<b>\u12E8\u1245\u122D\u1265 \u130A\u12DC \u130D\u1265\u12E3\u12CE\u127D</b>` +
     (r.recent.map(t => `<div class="pl">${esc(t.name)} \u2190 ${esc(t.inviter_name)} ${Number(t.referral_paid) > 0 ? '\u2705' : '\u23F3'}</div>`).join('') || '<p>\u2014</p>') + `</div>`;
@@ -2309,11 +2560,79 @@ async function loadSettings() {
     const r = await fetch('/api/admin/settings', {headers: HEADERS()});
     if (!r.ok) return;
     const d = await r.json();
-    renderRules(d.rules); renderPromos(d.promos); renderSms(d.sms, d.incoming); renderRefs(d.referrals);
+    renderRules(d.rules); renderPromos(d.promos); renderSms(d.sms, d.incoming); renderRefs(d.referrals); renderSettings(d.settings); renderClaims(d.claims);
   } catch (e) {}
 }
-document.getElementById('refresh').onclick = () => { load(); loadSettings(); }; load(); loadSettings();
+
+function fmtAgo(s) {
+  if (!s) return '\u2014';
+  const d = new Date(String(s).replace(' ', 'T') + 'Z');
+  const m = Math.round((Date.now() - d.getTime()) / 60000);
+  if (isNaN(m)) return '\u2014';
+  if (m < 1) return '\u12A0\u1201\u1295';
+  if (m < 60) return m + ' \u12F0\u1242\u1243 \u1260\u134A\u1275';
+  if (m < 1440) return Math.floor(m / 60) + ' \u1230\u12D3\u1275 \u1260\u134A\u1275';
+  return Math.floor(m / 1440) + ' \u1240\u1295 \u1260\u134A\u1275';
+}
+let PL_TIMER = null;
+async function loadPlayers() {
+  try {
+    const q = encodeURIComponent(document.getElementById('pl-q').value || '');
+    const f = document.getElementById('pl-f').value;
+    const r = await fetch('/api/admin/players?q=' + q + '&filter=' + f, {headers: HEADERS()});
+    if (!r.ok) return;
+    const d = await r.json(), s = d.summary;
+    document.getElementById('pl-sum').innerHTML =
+      `\u1320\u1245\u120B\u120B: <b>${Number(s.total)}</b> \u00B7 \uD83C\uDFAE \u12A0\u1201\u1295 \u1260\u1328\u12CB\u1273 \u120B\u12ED: <b>${Number(s.playing)}</b> \u00B7 \uD83D\uDFE2 \u12A6\u1295\u120B\u12ED\u1295: <b>${Number(s.online)}</b> \u00B7 \u23F1 \u1263\u1208\u1349\u1275 24 \u1230\u12D3\u1275: <b>${Number(s.active24)}</b>` +
+      `<p>\uD83D\uDCB0 \u12E8\u1201\u1209\u121D \u1270\u132B\u12CB\u127E\u127D \u1320\u1245\u120B\u120B \u1202\u1233\u1265: <b>${birr(s.money)}</b> \u1265\u122D \u00B7 \u12E8\u1270\u1308\u1299: ${Number(d.matched)}</p>`;
+    document.getElementById('pl-list').innerHTML = (d.players || []).map(p =>
+      `<div class="req"><b>${p.playing ? '\uD83C\uDFAE ' : (p.online ? '\uD83D\uDFE2 ' : '')}${esc(p.name)}</b>` +
+      `<span>ID ${esc(p.user_id)}${p.phone ? ' \u00B7 ' + esc(p.phone) : ''}</span>` +
+      `<p>Play: <b>${birr(p.credits)}</b> \u00B7 Win: <b>${birr(p.win_credits)}</b> \u00B7 \uD83C\uDF9F ${Number(p.cards)} \u12AB\u122D\u12F6\u127D</p>` +
+      `<p>\u1208\u1218\u1328\u1228\u123B \u130A\u12DC \u12E8\u1273\u12E8\u12CD: ${esc(fmtAgo(p.last_seen_at))}</p></div>`).join('') || '\u2014';
+  } catch (e) {}
+}
+document.getElementById('pl-q').oninput = () => { clearTimeout(PL_TIMER); PL_TIMER = setTimeout(loadPlayers, 300); };
+document.getElementById('pl-f').onchange = loadPlayers;
+
+function renderSettings(s) {
+  document.getElementById('st-nub').value = s.new_user_bonus;
+  document.getElementById('st-rr').value = s.referral_reward;
+  document.getElementById('st-rmd').value = s.referral_min_deposit;
+}
+document.getElementById('st-save').onclick = async () => {
+  const ok = await postJson('/api/admin/setting', {new_user_bonus: Number(document.getElementById('st-nub').value || 0),
+    referral_reward: Number(document.getElementById('st-rr').value || 0),
+    referral_min_deposit: Number(document.getElementById('st-rmd').value || 0)});
+  if (ok) { alert('\u1270\u1240\u121D\u1327\u120D \u2705'); loadSettings(); }
+};
+
+function renderClaims(list) {
+  document.getElementById('claim-list').innerHTML = (list || []).map(c =>
+    `<div class="req"><b>${esc(c.name)}</b> \u00B7 ${birr(c.amount)} \u1265\u122D ${c.active ? '\u2705' : '\u23F8'}` +
+    `<p>\u12E8\u12C8\u1230\u12F1: ${Number(c.claimed)}${c.max_claims ? ' / ' + Number(c.max_claims) : ' (\u12EB\u120D\u1270\u12C8\u1230\u1290)'} \u00B7 ${c.audience === 'new' ? '\u1208\u12A0\u12F2\u1235 \u1270\u1320\u1243\u121A' : '\u1208\u1201\u1209\u121D'}` +
+    (c.expires_at ? ` \u00B7 \u12A5\u1235\u12A8: ${esc(fmtTime(c.expires_at))}` : '') + `</p>` +
+    `<button onclick="claimAct(${Number(c.id)},'toggle')" style="${BTN}background:#ffe629">${c.active ? '\u12A0\u1241\u121D' : '\u12A0\u1235\u1300\u121D\u122D'}</button>` +
+    `<button onclick="claimAct(${Number(c.id)},'delete')" style="${BTN}background:#d63939;color:#fff">\uD83D\uDDD1</button></div>`).join('') || '\u2014';
+}
+async function claimAct(id, what) {
+  if (what === 'delete' && !confirm('\u1266\u1290\u1231 \u12ED\u1230\u1228\u12DD?')) return;
+  if (await postJson('/api/admin/claim-bonus', {id, [what]: true})) loadSettings();
+}
+document.getElementById('cb-save').onclick = async () => {
+  const g = id => document.getElementById(id);
+  const announce = g('cb-ann').checked;
+  const ok = await postJson('/api/admin/claim-bonus', {name: g('cb-name').value, amount: Number(g('cb-amount').value),
+    max_claims: Number(g('cb-max').value || 0), audience: g('cb-aud').value, expires: g('cb-exp').value, announce});
+  if (ok) {
+    ['cb-name', 'cb-amount', 'cb-max', 'cb-exp'].forEach(x => g(x).value = '');
+    alert(announce ? '\u1270\u1348\u1325\u122F\u120D \u2705 \u1218\u120D\u12A5\u12AD\u1271 \u1208\u1201\u1209\u121D \u1270\u132B\u12CB\u127D \u12A5\u12E8\u1270\u120B\u12A8 \u1290\u12CD' : '\u1270\u1348\u1325\u122F\u120D \u2705');
+    loadSettings();
+  }
+};
+document.getElementById('refresh').onclick = () => { load(); loadSettings(); loadPlayers(); }; load(); loadSettings(); loadPlayers();
 setInterval(loadLive, 5000);
+setInterval(() => { if (!document.hidden) loadPlayers(); }, 10000);
 """
 
 
@@ -2365,7 +2684,16 @@ def api_miniapp_game():
     if not user:
         return json_error("Unauthorized", 401)
     uid = user["id"]
-    last_seen[uid] = time.time()
+    now_seen = time.time()
+    first_in_a_while = now_seen - last_seen.get(uid, 0) > 60
+    last_seen[uid] = now_seen
+    if first_in_a_while:   # remember when the player was last active (written at most once a minute)
+        try:
+            with closing(db()) as con:
+                con.execute("UPDATE users SET last_seen_at=CURRENT_TIMESTAMP WHERE user_id=?", (int(uid),))
+                con.commit()
+        except Exception:
+            logger.exception("could not save last_seen_at")
     if len(last_seen) > 5000:
         for k in [k for k, t in list(last_seen.items()) if time.time() - t > 60]:
             last_seen.pop(k, None)
@@ -2545,12 +2873,36 @@ def api_miniapp_withdraw():
 
 @app.get("/api/miniapp/rank")
 def miniapp_rank():
-    with closing(db()) as con:
-        rows = con.execute(
-            "SELECT username, first_name, win_credits FROM users ORDER BY win_credits DESC LIMIT 10").fetchall()
-        return jsonify({"rows": [
-            {"name": ("@" + r["username"]) if r["username"] else (r["first_name"] or "Player"),
-             "credits": r["win_credits"]} for r in rows]})
+    user = api_user()
+    ranking = card_ranking()
+    out = {"rows": [{"name": display_name(uid), "cards": cards} for uid, cards in ranking[:RANK_SIZE]], "me": None}
+    if user:
+        for i, (uid, cards) in enumerate(ranking, 1):
+            if uid == int(user["id"]):
+                out["me"] = {"rank": i, "cards": cards}
+                break
+    return jsonify(out)
+
+
+@app.get("/api/miniapp/bonuses")
+def miniapp_bonuses():
+    user = api_user()
+    if not user:
+        return json_error("Unauthorized", 401)
+    return jsonify({"bonuses": claimable_bonuses(user["id"])})
+
+
+@app.post("/api/miniapp/claim-bonus")
+def miniapp_claim_bonus():
+    user = api_user()
+    if not user:
+        return json_error("Unauthorized", 401)
+    body = request.get_json(silent=True) or {}
+    result, amount = claim_bonus(user["id"], body.get("id"))
+    message = claim_message(user["id"], result, amount)
+    if result != "ok":
+        return json_error(message)
+    return jsonify({"ok": True, "message": message})
 
 
 def live_snapshot():
@@ -2722,8 +3074,12 @@ def admin_settings():
     top = [dict(r, name=display_name(r["inviter"])) for r in top]
     recent = [dict(r, name=display_name(r["user_id"]), inviter_name=display_name(r["referred_by"])) for r in recent]
     url = (PUBLIC_URL + "/api/sms-webhook?key=" + SMS_SECRET) if (SMS_SECRET and PUBLIC_URL) else ""
-    return jsonify({"rules": rules, "promos": promos, "incoming": incoming,
-                    "referrals": {"top": top, "recent": recent, "reward": REFERRAL_REWARD},
+    with closing(db()) as con:
+        claims = [dict(r) for r in con.execute("SELECT * FROM claim_bonuses ORDER BY id DESC LIMIT 30").fetchall()]
+        settings = {k: setting_con(con, k) for k in SETTING_DEFAULTS}
+    return jsonify({"rules": rules, "promos": promos, "incoming": incoming, "claims": claims, "settings": settings,
+                    "referrals": {"top": top, "recent": recent, "reward": settings["referral_reward"],
+                                  "min_deposit": settings["referral_min_deposit"]},
                     "sms": {"configured": bool(SMS_SECRET), "url": url, "number": PAY_NUMBER, "name": PAY_NAME}})
 
 
@@ -2798,6 +3154,113 @@ def admin_promo():
             "expires_at=excluded.expires_at, active=1", (code, reward, max_uses, expires))
         con.commit()
     return jsonify({"ok": True})
+
+
+@app.get("/api/admin/players")
+def admin_players():
+    """Admin only: who plays, who is online / active, how much money everybody has."""
+    user = api_admin()
+    if not user:
+        return json_error("Admin access denied", 403)
+    q = (request.args.get("q") or "").strip().lower()[:40]
+    flt = request.args.get("filter") or "all"
+    now = time.time()
+    with game_lock:
+        playing = {int(u) for u, c in game_state["player_cards"].items() if c}
+    online = {int(u) for u, t in list(last_seen.items()) if now - t < 20}
+    day_ago = fmt_db(utc_now() - timedelta(hours=24))
+    with closing(db()) as con:
+        rows = con.execute(
+            "SELECT user_id, username, first_name, phone, credits, win_credits, last_seen_at FROM users").fetchall()
+        cards = {int(r[0]): int(r[1] or 0) for r in con.execute(
+            "SELECT rp.user_id, SUM(rp.cards) FROM round_players rp JOIN rounds r ON r.id=rp.round_id "
+            "WHERE r.status!='refunded' GROUP BY rp.user_id").fetchall()}
+    summary = {"total": len(rows), "playing": 0, "online": 0, "active24": 0, "money": 0.0}
+    players = []
+    for r in rows:
+        uid = int(r["user_id"])
+        is_playing, is_online = uid in playing, uid in online
+        active24 = is_online or bool(r["last_seen_at"] and r["last_seen_at"] >= day_ago)
+        summary["playing"] += 1 if is_playing else 0
+        summary["online"] += 1 if is_online else 0
+        summary["active24"] += 1 if active24 else 0
+        summary["money"] += float(r["credits"]) + float(r["win_credits"])
+        name = ("@" + r["username"]) if r["username"] else (r["first_name"] or "Player")
+        if q and q not in (name.lower() + " " + str(uid) + " " + (r["phone"] or "")):
+            continue
+        if ((flt == "playing" and not is_playing) or (flt == "online" and not is_online)
+                or (flt == "active" and not active24)
+                or (flt == "balance" and float(r["credits"]) + float(r["win_credits"]) <= 0)):
+            continue
+        players.append({"user_id": uid, "name": name, "phone": r["phone"] or "", "credits": r["credits"],
+                        "win_credits": r["win_credits"], "cards": cards.get(uid, 0), "playing": is_playing,
+                        "online": is_online, "last_seen_at": r["last_seen_at"]})
+    players.sort(key=lambda p: p["last_seen_at"] or "", reverse=True)
+    players.sort(key=lambda p: (not p["playing"], not p["online"]))
+    return jsonify({"summary": summary, "matched": len(players), "players": players[:200]})
+
+
+@app.post("/api/admin/setting")
+def admin_setting():
+    user = api_admin()
+    if not user:
+        return json_error("Admin access denied", 403)
+    b = request.get_json(silent=True) or {}
+    clean = {}
+    for key in SETTING_DEFAULTS:
+        if key in b:
+            try:
+                v = float(b[key])
+            except (TypeError, ValueError):
+                return json_error("\u1275\u12ad\u12ad\u120d \u12eb\u120d\u1206\u1290 \u1218\u1228\u1303")
+            if not (0 <= v <= 100000):
+                return json_error("\u1218\u1320\u1291 \u12a80 \u12a5\u1235\u12a8 100000 \u1218\u1206\u1295 \u12a0\u1208\u1260\u1275")
+            clean[key] = v
+    for key, v in clean.items():
+        set_setting(key, v)
+    return jsonify({"ok": True})
+
+
+@app.post("/api/admin/claim-bonus")
+def admin_claim_bonus():
+    user = api_admin()
+    if not user:
+        return json_error("Admin access denied", 403)
+    b = request.get_json(silent=True) or {}
+    with closing(db()) as con:
+        if b.get("delete"):
+            con.execute("DELETE FROM claim_bonuses WHERE id=?", (int(b.get("id") or 0),))
+            con.execute("DELETE FROM claim_bonus_uses WHERE bonus_id=?", (int(b.get("id") or 0),))
+            con.commit()
+            return jsonify({"ok": True})
+        if b.get("toggle"):
+            con.execute("UPDATE claim_bonuses SET active=1-active WHERE id=?", (int(b.get("id") or 0),))
+            con.commit()
+            return jsonify({"ok": True})
+        try:
+            amount = float(b.get("amount"))
+            max_claims = int(b.get("max_claims") or 0)
+        except (TypeError, ValueError):
+            return json_error("\u1275\u12ad\u12ad\u120d \u12eb\u120d\u1206\u1290 \u1218\u1228\u1303")
+        if amount <= 0 or max_claims < 0:
+            return json_error("\u1266\u1290\u1231 \u12a80 \u1260\u120b\u12ed \u1218\u1206\u1295 \u12a0\u1208\u1260\u1275")
+        audience = "new" if b.get("audience") == "new" else "all"
+        name = str(b.get("name") or "").strip()[:40] or "\u1266\u1290\u1235"
+        expires = None
+        if b.get("expires"):
+            try:   # a date in Ethiopia time: valid until the end of that day
+                d = datetime.strptime(str(b["expires"])[:10], "%Y-%m-%d")
+                expires = fmt_db(d + timedelta(hours=24) - timedelta(hours=3) - timedelta(seconds=1))
+            except ValueError:
+                return json_error("\u1240\u1291 \u1275\u12ad\u12ad\u120d \u12a0\u12ed\u12f0\u1208\u121d")
+        cur = con.execute(
+            "INSERT INTO claim_bonuses(name, amount, max_claims, audience, expires_at, active) VALUES(?,?,?,?,?,1)",
+            (name, amount, max_claims, audience, expires))
+        bid = cur.lastrowid
+        con.commit()
+    if b.get("announce"):
+        threading.Thread(target=broadcast_claim_bonus, args=(bid,), daemon=True, name="claim-broadcast").start()
+    return jsonify({"ok": True, "id": bid})
 
 
 @app.post("/telegram-webhook" if not WEBHOOK_SECRET_PATH else "/telegram-webhook/" + WEBHOOK_SECRET_PATH)
