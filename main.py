@@ -55,7 +55,7 @@ NEW_USER_BONUS = 10  # welcome bonus (ETB) for a NEW user who shares his phone c
 HOUSE_PERCENT = 15   # owner's share of every round's prize pool (winners share the other 85%)
 MIN_WITHDRAW = 100   # smallest withdrawal a player may ask for (ETB)
 MAX_PENDING_DEPOSITS = 5  # unreviewed deposit requests one player may have at the same time
-MAX_CARDS_PER_PLAYER = 4
+MAX_CARDS_PER_PLAYER = 10   # most cards one player may hold in a round
 RANK_SIZE = 10      # how many players the Rank screen shows
 NEW_USER_DAYS = 7   # a claim bonus for 'new' users is open to accounts created in the last 7 days
 SELECTION_TIME_SECONDS = 50
@@ -66,12 +66,42 @@ TOTAL_CARDS = 600
 PAY_NUMBER = os.environ.get("PAY_NUMBER", "0928564065").strip()   # the owner's Telebirr number
 PAY_NAME = os.environ.get("PAY_NAME", "Eineyew").strip()         # the name shown to players
 PAY_TAIL = re.sub(r"\D", "", PAY_NUMBER)[-4:]
+
+# ---- deposit methods: Telebirr, Abyssinia Bank, Ebirr (v13) ----
+# A method is shown to players ONLY when its number is filled in. Set the numbers in Render > Environment
+# (ABYSSINIA_NUMBER, EBIRR_NUMBER ...) or type them between the quotes below.
+ABYSSINIA_NUMBER = os.environ.get("ABYSSINIA_NUMBER", "82003298").strip()   # Bank of Abyssinia account number
+ABYSSINIA_NAME = os.environ.get("ABYSSINIA_NAME", "Enyew").strip()
+EBIRR_NUMBER = os.environ.get("EBIRR_NUMBER", "0928564065").strip()           # Ebirr (Kaafi) number
+EBIRR_NAME = os.environ.get("EBIRR_NAME", "Enyew").strip()
+DEPOSIT_METHODS = [
+    {"key": "telebirr", "label": "Telebirr", "icon": "📱", "number": PAY_NUMBER, "name": PAY_NAME,
+     "num_am": "ስልክ ቁጥር", "num_en": "Phone number"},
+    {"key": "abyssinia", "label": "Abyssinia Bank", "icon": "🏦", "number": ABYSSINIA_NUMBER, "name": ABYSSINIA_NAME,
+     "num_am": "የሒሳብ ቁጥር", "num_en": "Account number"},
+    {"key": "ebirr", "label": "Ebirr", "icon": "💵", "number": EBIRR_NUMBER, "name": EBIRR_NAME,
+     "num_am": "ቁጥር", "num_en": "Number"},
+]
+WITHDRAW_METHOD = "Telebirr"   # withdrawals are paid with Telebirr only
+
+
+def deposit_methods():
+    return [m for m in DEPOSIT_METHODS if m["number"]]
+
+
+def deposit_method(key):
+    k = str(key or "").strip().lower()
+    for m in DEPOSIT_METHODS:
+        if k in (m["key"], m["label"].lower()):
+            return m
+    return None
 MIN_DEPOSIT = 20          # smallest deposit (ETB)
 REFERRAL_REWARD = 50      # ETB bonus (Play wallet) the inviter gets when an invited person's deposit is approved (editable in the admin panel)
 REFERRAL_MIN_DEPOSIT = 50  # smallest approved deposit of the invited person that pays the inviter (editable in the admin panel)
 # Secret for the phone's SMS-forwarding webhook (/api/sms-webhook). Without it the webhook is disabled.
 SMS_SECRET = os.environ.get("SMS_SECRET", "").strip()
 SMS_SENDER = os.environ.get("SMS_SENDER", "").strip()  # optional: only accept SMS from this sender name/number
+SMS_SENDERS = {x.strip().lower() for x in SMS_SENDER.split(",") if x.strip()}   # comma separated list is allowed
 RECEIPT_URL = "https://transactioninfo.ethiotelecom.et/receipt/"
 FINISHED_SECONDS = 4  # how long the "BINGO!" result stays on screen
 SUPPORT_USERNAME = os.environ.get("SUPPORT_USERNAME", "beshbesh08").strip().lstrip("@")
@@ -249,6 +279,14 @@ def init_db():
             PRIMARY KEY (bonus_id, user_id)
         );
         """)
+        icols = {r["name"] for r in con.execute("PRAGMA table_info(incoming_payments)").fetchall()}
+        if "alt_ref" not in icols:
+            con.execute("ALTER TABLE incoming_payments ADD COLUMN alt_ref TEXT NOT NULL DEFAULT ''")
+        if "method" not in icols:
+            con.execute("ALTER TABLE incoming_payments ADD COLUMN method TEXT NOT NULL DEFAULT 'Telebirr'")
+        pcols = {r["name"] for r in con.execute("PRAGMA table_info(promo_codes)").fetchall()}
+        if "min_deposit" not in pcols:
+            con.execute("ALTER TABLE promo_codes ADD COLUMN min_deposit REAL NOT NULL DEFAULT 0")
         if fresh_rules:
             # Ethiopia time (UTC+3), standard clock. days: Monday=0 ... Sunday=6
             con.executemany(
@@ -630,7 +668,7 @@ TEXT = {
         "admin": "\U0001f6e1 \u12a0\u12f5\u121a\u1295",
         "choose": "\u12a8\u1273\u127d \u12ab\u1209\u1275 \u12a0\u121b\u122b\u132e\u127d \u12ed\u121d\u1228\u1321\u1362",
         "balance_msg": "\U0001f4b0 \u1240\u122a \u1202\u1233\u1265\u12ce\u1366\n\u12e8\u1218\u132b\u12c8\u127b \u1202\u1233\u1265 (Play): {credits} \u1265\u122d\n\u12e8\u12a0\u1238\u1293\u134a\u1290\u1275 \u1202\u1233\u1265 (Win): {win_credits} \u1265\u122d",
-        "rules_msg": "\U0001f4dc \u12f0\u1295\u1266\u127d\n\u2022 \u12e8\u12a0\u1295\u12f5 \u12ab\u122d\u12f5 \u12cb\u130b 10 \u1265\u122d \u1290\u12cd\n\u2022 \u12a81 \u12a5\u1235\u12a8 600 \u12ab\u122d\u12f6\u127d \u1218\u121d\u1228\u1325 \u12ed\u127b\u120b\u120d (\u1262\u1260\u12db 4 \u12ab\u122d\u12f5)\n\u2022 \u12a81 \u12a5\u1235\u12a8 75 \u12eb\u1209 \u1241\u1325\u122e\u127d \u12ed\u1320\u122b\u1209\n\u2022 \u12a0\u1295\u12f5 \u1228\u12f5\u134d\u1363 \u12a0\u121d\u12f5\u1363 \u1230\u12eb\u134d \u12c8\u12ed\u121d \u12a0\u122b\u1271 \u121b\u12d5\u12d8\u1296\u127d \u1232\u121e\u1209 \u1262\u1295\u130e \u1290\u12cd",
+        "rules_msg": "\U0001f4dc \u12f0\u1295\u1266\u127d\n\u2022 \u12e8\u12a0\u1295\u12f5 \u12ab\u122d\u12f5 \u12cb\u130b 10 \u1265\u122d \u1290\u12cd\n\u2022 \u12a81 \u12a5\u1235\u12a8 600 \u12ab\u122d\u12f6\u127d \u1218\u121d\u1228\u1325 \u12ed\u127b\u120b\u120d (\u1262\u1260\u12db 10 \u12ab\u122d\u12f5)\n\u2022 \u12a81 \u12a5\u1235\u12a8 75 \u12eb\u1209 \u1241\u1325\u122e\u127d \u12ed\u1320\u122b\u1209\n\u2022 \u12a0\u1295\u12f5 \u1228\u12f5\u134d\u1363 \u12a0\u121d\u12f5\u1363 \u1230\u12eb\u134d \u12c8\u12ed\u121d \u12a0\u122b\u1271 \u121b\u12d5\u12d8\u1296\u127d \u1232\u121e\u1209 \u1262\u1295\u130e \u1290\u12cd",
         "language_set": "\u124b\u1295\u124b\u12cd \u12c8\u12f0 \u12a0\u121b\u122d\u129b \u1270\u1240\u12ed\u122f\u120d\u1362",
         "dep_approved": "\u2705 {amount} \u1265\u122d \u12c8\u12f0 \u1202\u1233\u1265\u12ce \u1270\u1328\u121d\u122f\u120d\u1362 \u1218\u120d\u12ab\u121d \u1328\u12cb\u1273!",
         "dep_rejected": "\u274c \u12e8{amount} \u1265\u122d \u12e8\u1308\u1295\u12d8\u1265 \u121b\u1235\u1308\u1262\u12eb \u1325\u12eb\u1244\u12ce \u12cd\u12f5\u1245 \u1270\u12f0\u122d\u1313\u120d\u1362 \u12a5\u1263\u12ad\u12ce \u12a0\u1235\u1270\u12f3\u12f3\u122a\u12cd\u1295 \u12eb\u1290\u130b\u130d\u1229\u1362",
@@ -677,12 +715,16 @@ TEXT["en"].update({
 })
 
 
-TEXT["am"]["rules_msg"] = "\U0001f4dc \u1205\u130d\u1293 \u12f0\u1295\u1266\u127d\n\n1. \u1328\u12cb\u1273\u12cd \u1219\u1209 \u1260\u1219\u1209 \u12e8\u12d5\u12f5\u120d \u1290\u12cd\u1364 \u12a5\u12eb\u1295\u12f3\u1295\u12f1 \u12d9\u122d \u1208\u1265\u127b\u12cd \u1290\u12cd\u1362\n2. \u12e8\u12a0\u1295\u12f5 \u12ab\u122d\u12f5 \u12cb\u130b 10 \u1265\u122d \u1290\u12cd\u1362 \u12a81 \u12a5\u1235\u12a8 600 \u12ab\u122d\u12f5 \u1218\u121d\u1228\u1325 \u12ed\u127b\u120b\u120d (\u1262\u1260\u12db 4 \u12ab\u122d\u12f5)\u1364 \u12e8\u1218\u121d\u1228\u132b \u130a\u12dc 50 \u1230\u12a8\u1295\u12f5 \u1290\u12cd\u1362\n3. \u12a81 \u12a5\u1235\u12a8 75 \u12eb\u1209 \u1241\u1325\u122e\u127d \u12ed\u1320\u122b\u1209\u1362 \u12a0\u1295\u12f5 \u1228\u12f5\u134d\u1363 \u12a0\u1295\u12f5 \u12d3\u121d\u12f5\u1363 \u1230\u12eb\u134d \u12c8\u12ed\u121d \u12a0\u122b\u1271 \u1325\u130d \u1232\u121e\u120b \u1262\u1295\u130e \u1290\u12cd\u1362\n4. \u12eb\u1235\u1308\u1261\u1275 \u1265\u122d \u1270\u1218\u120b\u123d \u12a0\u12ed\u12f0\u1228\u130d\u121d\u1364 \u1208\u1328\u12cb\u1273 \u12ed\u12cd\u120b\u120d\u1362 \u12dd\u1245\u1270\u129b\u12cd \u1308\u1295\u12d8\u1265 \u121b\u1235\u1308\u1262\u12eb 20 \u1265\u122d \u1290\u12cd\u1362\n5. \u121b\u12cd\u1323\u1275 \u12e8\u121a\u127b\u1208\u12cd \u12a8\u12a0\u1238\u1293\u134a\u1290\u1275 (Win) \u1202\u1233\u1265 \u1265\u127b \u1290\u12cd\u1364 \u12dd\u1245\u1270\u129b\u12cd \u12e8\u121b\u12cd\u132b \u1218\u1320\u1295 100 \u1265\u122d \u1290\u12cd\u1362\n6. \u12a821 \u12d3\u1218\u1275 \u1260\u1273\u127d \u1208\u1206\u1291 \u12ad\u120d\u12ad\u120d \u1290\u12cd\u1362\n7. \u1328\u12cb\u1273\u12cd \u1208\u1218\u12dd\u1293\u129b \u1265\u127b \u1290\u12cd\u1364 \u12aa\u1235\u12ce\u1295 \u1260\u121b\u12ed\u130e\u12f3 \u1218\u1320\u1295 \u1265\u127b \u12ed\u132b\u12c8\u1271\u1362"
-TEXT["en"]["rules_msg"] = "\U0001f4dc Rules\n\n1. The game is purely a game of chance; every round stands on its own.\n2. A card costs 10 ETB. Pick cards from 1 to 600 (up to 4 cards); you have 50 seconds to choose.\n3. Numbers from 1 to 75 are called. A full row, column, diagonal or the four corners wins BINGO.\n4. Money you deposit is not refundable; it is used for playing. The minimum deposit is 20 ETB.\n5. You can withdraw only from the Win wallet; the minimum withdrawal is 100 ETB.\n6. Not allowed for anyone under 21 years old.\n7. For entertainment only: play only with an amount that does not hurt your pocket."
+TEXT["am"]["rules_msg"] = "\U0001f4dc \u1205\u130d\u1293 \u12f0\u1295\u1266\u127d\n\n1. \u1328\u12cb\u1273\u12cd \u1219\u1209 \u1260\u1219\u1209 \u12e8\u12d5\u12f5\u120d \u1290\u12cd\u1364 \u12a5\u12eb\u1295\u12f3\u1295\u12f1 \u12d9\u122d \u1208\u1265\u127b\u12cd \u1290\u12cd\u1362\n2. \u12e8\u12a0\u1295\u12f5 \u12ab\u122d\u12f5 \u12cb\u130b 10 \u1265\u122d \u1290\u12cd\u1362 \u12a81 \u12a5\u1235\u12a8 600 \u12ab\u122d\u12f5 \u1218\u121d\u1228\u1325 \u12ed\u127b\u120b\u120d (\u1262\u1260\u12db 10 \u12ab\u122d\u12f5)\u1364 \u12e8\u1218\u121d\u1228\u132b \u130a\u12dc 50 \u1230\u12a8\u1295\u12f5 \u1290\u12cd\u1362\n3. \u12a81 \u12a5\u1235\u12a8 75 \u12eb\u1209 \u1241\u1325\u122e\u127d \u12ed\u1320\u122b\u1209\u1362 \u12a0\u1295\u12f5 \u1228\u12f5\u134d\u1363 \u12a0\u1295\u12f5 \u12d3\u121d\u12f5\u1363 \u1230\u12eb\u134d \u12c8\u12ed\u121d \u12a0\u122b\u1271 \u1325\u130d \u1232\u121e\u120b \u1262\u1295\u130e \u1290\u12cd\u1362\n4. \u12eb\u1235\u1308\u1261\u1275 \u1265\u122d \u1270\u1218\u120b\u123d \u12a0\u12ed\u12f0\u1228\u130d\u121d\u1364 \u1208\u1328\u12cb\u1273 \u12ed\u12cd\u120b\u120d\u1362 \u12dd\u1245\u1270\u129b\u12cd \u1308\u1295\u12d8\u1265 \u121b\u1235\u1308\u1262\u12eb 20 \u1265\u122d \u1290\u12cd\u1362\n5. \u121b\u12cd\u1323\u1275 \u12e8\u121a\u127b\u1208\u12cd \u12a8\u12a0\u1238\u1293\u134a\u1290\u1275 (Win) \u1202\u1233\u1265 \u1265\u127b \u1290\u12cd\u1364 \u12dd\u1245\u1270\u129b\u12cd \u12e8\u121b\u12cd\u132b \u1218\u1320\u1295 100 \u1265\u122d \u1290\u12cd\u1362\n6. \u12a821 \u12d3\u1218\u1275 \u1260\u1273\u127d \u1208\u1206\u1291 \u12ad\u120d\u12ad\u120d \u1290\u12cd\u1362\n7. \u1328\u12cb\u1273\u12cd \u1208\u1218\u12dd\u1293\u129b \u1265\u127b \u1290\u12cd\u1364 \u12aa\u1235\u12ce\u1295 \u1260\u121b\u12ed\u130e\u12f3 \u1218\u1320\u1295 \u1265\u127b \u12ed\u132b\u12c8\u1271\u1362"
+TEXT["en"]["rules_msg"] = "\U0001f4dc Rules\n\n1. The game is purely a game of chance; every round stands on its own.\n2. A card costs 10 ETB. Pick cards from 1 to 600 (up to 10 cards); you have 50 seconds to choose.\n3. Numbers from 1 to 75 are called. A full row, column, diagonal or the four corners wins BINGO.\n4. Money you deposit is not refundable; it is used for playing. The minimum deposit is 20 ETB.\n5. You can withdraw only from the Win wallet; the minimum withdrawal is 100 ETB.\n6. Not allowed for anyone under 21 years old.\n7. For entertainment only: play only with an amount that does not hurt your pocket."
 
 
 TEXT["am"].update({"promo": "\U0001f381 \u1355\u122e\u121e \u12ae\u12f5", "invite": "\U0001f517 \u130b\u1265\u12dd \u12a5\u1293 \u12a0\u130d\u129d"})
 TEXT["en"].update({"promo": "\U0001f381 Promo code", "invite": "\U0001f517 Invite & earn"})
+
+
+TEXT["am"].update({"deposit": "📥 ገቢ ለማድረግ", "withdraw": "📤 ወጪ ለማድረግ"})
+TEXT["en"].update({"deposit": "📥 Deposit", "withdraw": "📤 Withdraw"})
 
 
 def tr(user_id, key, **kwargs):
@@ -699,6 +741,7 @@ def main_keyboard(user_id):
         rows.append([KeyboardButton(t["share_phone"], request_contact=True)])
     rows += [
         [KeyboardButton(t["play"]), KeyboardButton(t["balance"])],
+        [KeyboardButton(t["deposit"]), KeyboardButton(t["withdraw"])],
         [KeyboardButton(t["wallet"]), KeyboardButton(t["rank"])],
         [KeyboardButton(t["promo"]), KeyboardButton(t["invite"])],
         [KeyboardButton(t["rules"]), KeyboardButton(t["language"])],
@@ -749,7 +792,7 @@ async def language_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text("\u124b\u1295\u124b \u12ed\u121d\u1228\u1321 / Choose language:", reply_markup=keyboard)
 
 
-MENU_KEYS = ("play", "balance", "rules", "wallet", "rank", "language", "support", "promo", "invite")
+MENU_KEYS = ("play", "balance", "rules", "wallet", "rank", "language", "support", "promo", "invite", "deposit", "withdraw")
 LEGACY_MENU = ("\U0001f3ae Flash Bingo \u1328\u12cb\u1273", "\U0001f3ae Play Flash Bingo", "\U0001f4b0 \u1265\u122d \u1202\u1233\u1265", "\U0001f4dc \u1205\u130d \u12a5\u1293 \u12f0\u1295\u1266\u127d",
                "\U0001f4b3 Wallet / \u12aa\u1235 \u1266\u122d\u1233", "\U0001f3c6 \u12f0\u1228\u1303", "\U0001f310 \u124b\u1295\u124b / Language", "\U0001f198 \u12f5\u130b\u134d")
 
@@ -772,39 +815,115 @@ def cancel_markup(uid):
     return InlineKeyboardMarkup([[InlineKeyboardButton(L(uid, "\u274c \u1230\u122d\u12dd", "\u274c Cancel"), callback_data="w:cancel")]])
 
 
-def deposit_instructions(uid, amt):
+def deposit_instructions(uid, amt, method_key="telebirr"):
+    m = deposit_method(method_key) or DEPOSIT_METHODS[0]
     bonus, pct = bonus_preview(amt)
-    lines = [L(uid, "\U0001f4e5 \u1308\u1295\u12d8\u1265 \u121b\u1235\u1308\u1263\u1275 (Telebirr)", "\U0001f4e5 Deposit (Telebirr)"), "",
-             "\U0001f4de " + L(uid, "\u1241\u1325\u122d", "Number") + ": " + PAY_NUMBER,
-             "\U0001f464 " + L(uid, "\u1235\u121d", "Name") + ": " + PAY_NAME,
-             "\U0001f4b0 " + L(uid, "\u1218\u1320\u1295", "Amount") + ": " + money(amt) + " ETB"]
+    lines = [L(uid, "📥 ገንዘብ ማስገቢያ (%s)" % m["label"], "📥 Deposit (%s)" % m["label"]), "",
+             m["icon"] + " " + L(uid, m["num_am"], m["num_en"]) + ": " + m["number"],
+             "👤 " + L(uid, "ስም", "Name") + ": " + m["name"],
+             "💰 " + L(uid, "መጠን", "Amount") + ": " + money(amt) + " ETB"]
     if bonus > 0:
-        lines.append(L(uid, "\U0001f381 \u1266\u1290\u1235: +%s \u1265\u122d (%s%%) \u2014 \u12ad\u134d\u12eb\u12cd \u1260\u1270\u1228\u130b\u1308\u1320\u1260\u1275 \u1230\u12d3\u1275 \u12ed\u12c8\u1230\u1293\u120d" % (money(bonus), money(pct)),
-                       "\U0001f381 Bonus: +%s ETB (%s%%) \u2014 decided by the payment time" % (money(bonus), money(pct))))
+        lines.append(L(uid, "🎁 ቦነስ: +%s ብር (%s%%) — ክፍያው በተረጋገጠበት ሰዓት ይወሰናል" % (money(bonus), money(pct)),
+                       "🎁 Bonus: +%s ETB (%s%%) — decided by the payment time" % (money(bonus), money(pct))))
+    hint_am = {"abyssinia": "\n(የ Bank of Abyssinia SMS ውስጥ ያለውን Reference ቁጥር ወይም የደረሰኝ ሊንክ መላክ ይችላሉ።)",
+               "ebirr": "\n(የ Ebirr SMS ውስጥ ያለውን Ref ቁጥር ወይም የደረሰኝ ሊንክ መላክ ይችላሉ።)"}.get(m["key"], "")
+    hint_en = {"abyssinia": "\n(You can send the Reference number from the Bank of Abyssinia SMS or the receipt link.)",
+               "ebirr": "\n(You can send the Ref number from the Ebirr SMS or the receipt link.)"}.get(m["key"], "")
     lines += ["", L(uid,
-                     "1\ufe0f\u20e3 \u12a8\u120b\u12ed \u12c8\u12f3\u1208\u12cd \u1241\u1325\u122d %s \u1265\u122d \u1260 Telebirr \u12ed\u120b\u12a9\u1362\n"
-                     "2\ufe0f\u20e3 \u12a8\u12a8\u1348\u1209 \u1260\u128b\u120b \u12a8 Telebirr \u12e8\u12f0\u1228\u1230\u12ce\u1275\u1295 \u12e8 SMS \u133d\u1201\u134d \u1219\u1209 (\u12c8\u12ed\u121d \u12e8\u130d\u1265\u12ed\u1275 \u1241\u1325\u1229\u1295 - Transaction ID) \u12a5\u12da\u1205 \u12ed\u120b\u12a9\u1362\n\n"
-                     "\u12ad\u134d\u12eb\u12cd \u1232\u1228\u130b\u1308\u1325 \u12c8\u12f2\u12eb\u12cd\u1291 \u12c8\u12f0 \u1202\u1233\u1265\u12ce \u12ed\u1328\u1218\u122b\u120d\u1362" % money(amt),
-                     "1\ufe0f\u20e3 Send %s ETB to the number above with Telebirr.\n"
-                     "2\ufe0f\u20e3 After paying, send the full Telebirr SMS text (or just the Transaction ID) here.\n\n"
-                     "It is added to your balance as soon as the payment is confirmed." % money(amt))]
+                     "1️⃣ ከላይ ወዳለው ቁጥር %s ብር በ %s ይላኩ።\n"
+                     "2️⃣ ከከፈሉ በኋላ ከ %s የደረሰዎትን የ SMS ጽሑፍ ሙሉ (ወይም የግብይት ቁጥሩን - Transaction ID) እዚህ ይላኩ።%s\n\n"
+                     "ክፍያው ሲረጋገጥ ወዲያውኑ ወደ ሂሳብዎ ይጨመራል።" % (money(amt), m["label"], m["label"], hint_am),
+                     "1️⃣ Send %s ETB to the number above with %s.\n"
+                     "2️⃣ After paying, send the full SMS text from %s (or just the Transaction ID) here.%s\n\n"
+                     "It is added to your balance as soon as the payment is confirmed." % (money(amt), m["label"], m["label"], hint_en))]
     return "\n".join(lines)
+
+
+def method_keyboard(uid):
+    rows, row = [], []
+    for m in deposit_methods():
+        row.append(InlineKeyboardButton(m["label"] + " " + m["icon"], callback_data="dm:" + m["key"]))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton(L(uid, "❌ ሰርዝ", "❌ Cancel"), callback_data="w:cancel")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def show_deposit_methods(message, uid):
+    pct, cap = current_bonus()
+    text = L(uid, "📥 ገንዘብ ማስገቢያ\n\nየክፍያ አማራጭ ይምረጡ:-", "📥 Deposit\n\nChoose a payment method:-")
+    if pct > 0:
+        text += L(uid, "\n\n🎁 አሁን የገንዘብ ማስገቢያ ቦነስ: %s%%" % money(pct) + (" (እስከ %s ብር)" % money(cap) if cap else ""),
+                  "\n\n🎁 Deposit bonus right now: %s%%" % money(pct) + (" (up to %s ETB)" % money(cap) if cap else ""))
+    await message.reply_text(text, reply_markup=method_keyboard(uid))
+
+
+async def start_withdraw(message, uid, ud):
+    row = get_user(uid)
+    win = float(row["win_credits"]) if row else 0.0
+    if win < MIN_WITHDRAW:
+        await message.reply_text(L(uid,
+            "📤 ገንዘብ ማውጫ (%s ብቻ)\n\nማውጣት የሚችሉት ከአሸናፊነት (Win) ሂሳብዎ ብቻ ነው።\nየ Win ሂሳብዎ: %s ብር\nዝቅተኛው የማውጫ መጠን: %d ብር" % (WITHDRAW_METHOD, money(win), MIN_WITHDRAW),
+            "📤 Withdraw (%s only)\n\nYou can withdraw only from your Win wallet.\nYour Win wallet: %s ETB\nMinimum withdrawal: %d ETB" % (WITHDRAW_METHOD, money(win), MIN_WITHDRAW)))
+        return
+    ud["state"] = "wd_amount"
+    ud.pop("wd_amount", None)
+    await message.reply_text(L(uid,
+        "📤 ገንዘብ ማውጫ (%s ብቻ)\n\nየ Win ሂሳብዎ: %s ብር\nስንት ብር ማውጣት ይፈልጋሉ? (ዝቅተኛ %d ብር)\nቁጥር ብቻ ይላኩ።" % (WITHDRAW_METHOD, money(win), MIN_WITHDRAW),
+        "📤 Withdraw (%s only)\n\nYour Win wallet: %s ETB\nHow much do you want to withdraw? (minimum %d ETB)\nSend the number only." % (WITHDRAW_METHOD, money(win), MIN_WITHDRAW)),
+        reply_markup=cancel_markup(uid))
+
+
+def telebirr_phone(text):
+    """The Ethiopian mobile number inside what the player typed (09xxxxxxxx), or None."""
+    t = re.sub(r"[\s\-]", "", str(text or ""))
+    m = re.search(r"(?<!\d)(?:\+?251|0)?([79]\d{8})(?!\d)", t)
+    return ("0" + m.group(1)) if m else None
+
+
+def create_withdraw(uid, amt, account_info):
+    """One withdrawal request from the bot chat or the Mini App (Telebirr only). Returns (ok, message)."""
+    account_info = str(account_info or "").strip()[:200]
+    if not amt or not account_info:
+        return False, L(uid, "እባክዎ መረጃውን ይሙሉ", "Please fill in all the details.")
+    if amt < MIN_WITHDRAW:
+        return False, L(uid, "ዝቅተኛው የማውጫ መጠን %d ብር ነው።" % MIN_WITHDRAW, "The minimum withdrawal is %d ETB." % MIN_WITHDRAW)
+    if not telebirr_phone(account_info):
+        return False, L(uid, "ገንዘብ ማውጣት በ Telebirr ብቻ ነው። እባክዎ ትክክለኛ የ Telebirr ስልክ ቁጥር ያስገቡ (ለምሳሌ 0912345678)።",
+                        "Withdrawals are paid with Telebirr only. Please enter a valid Telebirr phone number (e.g. 0912345678).")
+    stored = "%s: %s" % (WITHDRAW_METHOD, account_info)
+    with game_lock:  # serialize balance check + deduction
+        row = get_user(uid)
+        if (row["win_credits"] if row else 0.0) < amt:
+            return False, L(uid, "በአሸናፊነት ሂሳብዎ (Win Wallet) ውስጥ በቂ ገንዘብ የለም።", "Not enough money in your Win wallet.")
+        update_credits(uid, -amt, is_win=True)
+        with closing(db()) as con:
+            cur = con.execute("INSERT INTO withdraw_requests(user_id, account_info, amount) VALUES(?,?,?)",
+                              (uid, stored, amt))
+            req_id = cur.lastrowid
+            con.commit()
+    notify_withdraw(req_id, uid, stored, amt)
+    return True, L(uid, "✅ የገንዘብ ማውጫ ጥያቄዎ ተልኳል። ክፍያው ሲፈጸም መልዕክት ይደርስዎታል።",
+                   "✅ Your withdrawal request was sent. You will get a message when it is paid.")
 
 
 async def show_wallet(update, uid):
     row = get_user(uid)
     pct, cap = current_bonus()
-    text = L(uid, "\U0001f4b3 Wallet\n\nPlay: %s \u1265\u122d\nWin: %s \u1265\u122d" % (money(row["credits"]), money(row["win_credits"])),
-             "\U0001f4b3 Wallet\n\nPlay: %s ETB\nWin: %s ETB" % (money(row["credits"]), money(row["win_credits"])))
+    text = L(uid, "💳 Wallet\n\nPlay: %s ብር\nWin: %s ብር" % (money(row["credits"]), money(row["win_credits"])),
+             "💳 Wallet\n\nPlay: %s ETB\nWin: %s ETB" % (money(row["credits"]), money(row["win_credits"])))
     if pct > 0:
-        text += L(uid, "\n\n\U0001f381 \u12a0\u1201\u1295 \u12e8\u1308\u1295\u12d8\u1265 \u121b\u1235\u1308\u1262\u12eb \u1266\u1290\u1235: %s%%" % money(pct) + (" (\u12a5\u1235\u12a8 %s \u1265\u122d)" % money(cap) if cap else ""),
-                  "\n\n\U0001f381 Deposit bonus right now: %s%%" % money(pct) + (" (up to %s ETB)" % money(cap) if cap else ""))
-    text += L(uid, "\n\n\u1308\u1295\u12d8\u1265 \u1208\u121b\u1235\u1308\u1263\u1275 \u12a8\u1273\u127d \u12eb\u1208\u12cd\u1295 \u1241\u120d\u134d \u12ed\u132b\u1291\u1362 \u1208\u121b\u12cd\u1323\u1275 \u1260 Mini App \u12cd\u1235\u1325 Wallet \u2192 WITHDRAW \u12ed\u1320\u1240\u1219\u1362",
-              "\n\nTap the button below to deposit. To withdraw use Wallet \u2192 WITHDRAW inside the Mini App.")
-    rows = [[InlineKeyboardButton(L(uid, "\U0001f4e5 \u1308\u1295\u12d8\u1265 \u121b\u1235\u1308\u1263\u1275", "\U0001f4e5 Deposit"), callback_data="w:dep")]]
+        text += L(uid, "\n\n🎁 አሁን የገንዘብ ማስገቢያ ቦነስ: %s%%" % money(pct) + (" (እስከ %s ብር)" % money(cap) if cap else ""),
+                  "\n\n🎁 Deposit bonus right now: %s%%" % money(pct) + (" (up to %s ETB)" % money(cap) if cap else ""))
+    text += L(uid, "\n\nገንዘብ ለማስገባት ወይም ለማውጣት ከታች ያሉትን ቁልፎች ይጫኑ።",
+              "\n\nTap the buttons below to deposit or withdraw.")
+    rows = [[InlineKeyboardButton(L(uid, "📥 ገንዘብ ማስገባት", "📥 Deposit"), callback_data="w:dep"),
+             InlineKeyboardButton(L(uid, "📤 ገንዘብ ማውጣት", "📤 Withdraw"), callback_data="w:wd")]]
     if PUBLIC_URL:
-        rows.append([InlineKeyboardButton(L(uid, "\U0001f4e4 \u1308\u1295\u12d8\u1265 \u121b\u12cd\u1323\u1275 (Mini App)", "\U0001f4e4 Withdraw (Mini App)"),
-                                          web_app=WebAppInfo(url=webapp_url()))])
+        rows.append([InlineKeyboardButton("📱 Mini App", web_app=WebAppInfo(url=webapp_url()))])
     await update.effective_message.reply_text(text, reply_markup=InlineKeyboardMarkup(rows))
 
 
@@ -836,27 +955,52 @@ async def handle_state_text(update, ud, user, msg):
     if state == "dep_amount":
         amt = parse_amount(msg)
         if amt is None or amt < MIN_DEPOSIT:
-            await reply(L(uid, "\u26a0\ufe0f \u12a5\u1263\u12ad\u12ce \u1275\u12ad\u12ad\u1208\u129b \u1218\u1320\u1295 (\u1241\u1325\u122d \u1265\u127b) \u12ed\u120b\u12a9\u1362 \u12dd\u1245\u1270\u129b\u12cd %d \u1265\u122d \u1290\u12cd\u1362" % MIN_DEPOSIT,
-                          "\u26a0\ufe0f Please send a valid amount (numbers only). The minimum is %d ETB." % MIN_DEPOSIT),
+            await reply(L(uid, "⚠️ እባክዎ ትክክለኛ መጠን (ቁጥር ብቻ) ይላኩ። ዝቅተኛው %d ብር ነው።" % MIN_DEPOSIT,
+                          "⚠️ Please send a valid amount (numbers only). The minimum is %d ETB." % MIN_DEPOSIT),
                         reply_markup=cancel_markup(uid))
             return
         ud["dep_amount"], ud["state"] = amt, "dep_ref"
-        await reply(deposit_instructions(uid, amt), reply_markup=cancel_markup(uid))
+        await reply(deposit_instructions(uid, amt, ud.get("dep_method")), reply_markup=cancel_markup(uid))
     elif state == "dep_ref":
-        ref, err = extract_reference(msg)
+        mkey = ud.get("dep_method") or "telebirr"
+        ref, err = extract_reference(msg, mkey)
         if err:
             await reply(err, reply_markup=cancel_markup(uid))
             return
-        status, message = await loop.run_in_executor(None, submit_deposit, uid, ud.get("dep_amount") or MIN_DEPOSIT, ref)
+        status, message = await loop.run_in_executor(None, submit_deposit, uid, ud.get("dep_amount") or MIN_DEPOSIT, ref, mkey)
         if status in ("approved", "pending"):
-            ud.pop("state", None)
-            ud.pop("dep_amount", None)
+            for k in ("state", "dep_amount", "dep_method"):
+                ud.pop(k, None)
         if status != "approved":   # an approved deposit already sends its own confirmation
             await reply(message, reply_markup=(cancel_markup(uid) if status == "error" else None))
     elif state == "promo":
         ud.pop("state", None)
-        result, reward = await loop.run_in_executor(None, redeem_promo, uid, msg)
-        await reply(promo_message(uid, result, reward))
+        result, reward, extra = await loop.run_in_executor(None, redeem_promo, uid, msg)
+        await reply(promo_message(uid, result, reward, extra))
+    elif state == "wd_amount":
+        amt = parse_amount(msg)
+        row = get_user(uid)
+        win = float(row["win_credits"]) if row else 0.0
+        if amt is None or amt < MIN_WITHDRAW:
+            await reply(L(uid, "⚠️ ዝቅተኛው የማውጫ መጠን %d ብር ነው። ቁጥር ብቻ ይላኩ።" % MIN_WITHDRAW,
+                          "⚠️ The minimum withdrawal is %d ETB. Send the number only." % MIN_WITHDRAW),
+                        reply_markup=cancel_markup(uid))
+            return
+        if amt > win + 1e-9:
+            await reply(L(uid, "⚠️ በአሸናፊነት (Win) ሂሳብዎ ውስጥ በቂ ገንዘብ የለም። የ Win ሂሳብዎ: %s ብር።" % money(win),
+                          "⚠️ Not enough money in your Win wallet. Your Win wallet: %s ETB." % money(win)),
+                        reply_markup=cancel_markup(uid))
+            return
+        ud["wd_amount"], ud["state"] = amt, "wd_account"
+        await reply(L(uid, "📱 የ %s ስልክ ቁጥርዎን እና ስምዎን ይላኩ።\n\nለምሳሌ: 0912345678 አበበ ከበደ" % WITHDRAW_METHOD,
+                      "📱 Send your %s phone number and name.\n\nExample: 0912345678 Abebe Kebede" % WITHDRAW_METHOD),
+                    reply_markup=cancel_markup(uid))
+    elif state == "wd_account":
+        ok, message = await loop.run_in_executor(None, create_withdraw, uid, ud.get("wd_amount") or 0, msg)
+        if ok:
+            for k in ("state", "wd_amount"):
+                ud.pop(k, None)
+        await reply(message, reply_markup=(None if ok else cancel_markup(uid)))
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -871,7 +1015,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     menu = is_menu_text(msg)
     if menu:   # pressing any menu button cancels a half-finished deposit / promo entry
         ud.pop("state", None)
-        ud.pop("dep_amount", None)
+        for _k in ("dep_amount", "dep_method", "wd_amount"):
+            ud.pop(_k, None)
     elif ud.get("state"):
         await handle_state_text(update, ud, user, msg)
         return
@@ -891,6 +1036,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text(tr(user.id, "rules_msg"))
     elif msg in (t["wallet"], "\U0001f4b3 Wallet / \u12aa\u1235 \u1266\u122d\u1233", "\U0001f4b3 Wallet"):
         await show_wallet(update, user.id)
+    elif msg == t["deposit"]:
+        await show_deposit_methods(update.effective_message, user.id)
+    elif msg == t["withdraw"]:
+        await start_withdraw(update.effective_message, user.id, ud)
     elif msg == t["promo"]:
         ud["state"] = "promo"
         await update.effective_message.reply_text(
@@ -1090,23 +1239,37 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await query.answer()
     ensure_user(user_id, query.from_user.username, query.from_user.first_name)
-    if data.startswith("w:"):
+    if data.startswith(("w:", "dm:")):
         ud = context.user_data
         if data == "w:dep":
-            ud["state"] = "dep_amount"
-            ud.pop("dep_amount", None)
-            await query.message.reply_text(
-                L(user_id, "\U0001f4b0 \u1235\u1295\u1275 \u1265\u122d \u121b\u1235\u1308\u1263\u1275 \u12ed\u1348\u120d\u130b\u1209?\n\n\u12dd\u1245\u1270\u129b\u12cd %d \u1265\u122d \u1290\u12cd\u1362 \u1241\u1325\u122d \u1265\u127b \u12ed\u120b\u12a9 (\u1208\u121d\u1233\u120c 100)\u1362" % MIN_DEPOSIT,
-                  "\U0001f4b0 How much do you want to deposit?\n\nThe minimum is %d ETB. Send the number only (e.g. 100)." % MIN_DEPOSIT),
-                reply_markup=cancel_markup(user_id))
-        elif data == "w:cancel":
             ud.pop("state", None)
+            await show_deposit_methods(query.message, user_id)
+        elif data.startswith("dm:"):
+            m = deposit_method(data[3:])
+            if m is None or not m["number"]:
+                await query.message.reply_text(L(user_id, "ይህ የክፍያ አማራጭ ለጊዜው አይሰራም።", "This payment method is not available right now."))
+                return
+            ud["state"] = "dep_amount"
+            ud["dep_method"] = m["key"]
             ud.pop("dep_amount", None)
             try:
                 await query.edit_message_reply_markup(reply_markup=None)
             except Exception:
                 pass
-            await query.message.reply_text(L(user_id, "\u1270\u1230\u122d\u12df\u120d\u1362", "Cancelled."))
+            await query.message.reply_text(
+                L(user_id, "💰 ስንት ብር ማስገባት ይፈልጋሉ? (%s)\n\nዝቅተኛው %d ብር ነው። ቁጥር ብቻ ይላኩ (ለምሳሌ 100)።" % (m["label"], MIN_DEPOSIT),
+                  "💰 How much do you want to deposit? (%s)\n\nThe minimum is %d ETB. Send the number only (e.g. 100)." % (m["label"], MIN_DEPOSIT)),
+                reply_markup=cancel_markup(user_id))
+        elif data == "w:wd":
+            await start_withdraw(query.message, user_id, ud)
+        elif data == "w:cancel":
+            for k in ("state", "dep_amount", "dep_method", "wd_amount"):
+                ud.pop(k, None)
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            await query.message.reply_text(L(user_id, "ተሰርዟል።", "Cancelled."))
         return
     if data.startswith("lang:"):
         lang = data.split(":", 1)[1]
@@ -1301,7 +1464,9 @@ def current_bonus():
 def bonus_info():
     pct, cap = current_bonus()
     return {"bonus_percent": pct, "bonus_cap": cap, "pay_number": PAY_NUMBER, "pay_name": PAY_NAME,
-            "min_deposit": MIN_DEPOSIT}
+            "min_deposit": MIN_DEPOSIT, "max_cards": MAX_CARDS_PER_PLAYER,
+            "deposit_methods": [{"key": m["key"], "label": m["label"], "number": m["number"], "name": m["name"],
+                                 "number_label": m["num_am"]} for m in deposit_methods()]}
 
 
 def bonus_preview(amount):
@@ -1345,21 +1510,132 @@ def parse_telebirr_sms(text):
     return {"ref": m.group(1).upper(), "amount": amount, "paid_at": paid_at, "sender_tail": sender_tail}
 
 
-def extract_reference(text):
-    """Transaction ID from what the player typed or pasted (whole SMS, receipt link or the bare ID).
-    Returns (ref, error_message_or_None)."""
+def parse_ebirr_sms(text):
+    """Incoming-money SMS of Ebirr, e.g. '[-EBIRR-KAAFI-] Ref:802787751210 Confirmed. ETB30 Received from NAME (918719332),
+    Date: 15/11/26 04:00:25, ... https://receipt.ebirr.com/kaafimf/<token>'. Returns a dict or None."""
+    t = text or ""
+    if not re.search(r"\breceived\b", t, re.I):
+        return None
+    m = re.search(r"\bRef\s*[:#]?\s*(\d{6,16})", t, re.I)
+    if not m:
+        return None
+    a = re.search(r"Confirmed\.?\s*ETB\s*([\d,]+(?:\.\d+)?)", t, re.I) or re.search(r"ETB\s*([\d,]+(?:\.\d+)?)", t, re.I)
+    if not a:
+        return None
+    try:
+        amount = float(a.group(1).replace(",", ""))
+    except ValueError:
+        return None
+    if amount <= 0:
+        return None
+    paid_at = utc_now()
+    d = re.search(r"Date:?\s*(\d{1,2})/(\d{1,2})/(\d{2,4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?", t)
+    if d:
+        try:
+            year = int(d.group(3))
+            if year < 100:
+                year += 2000
+            local = datetime(year, int(d.group(2)), int(d.group(1)), int(d.group(4)), int(d.group(5)), int(d.group(6) or 0))
+            utc = local - timedelta(hours=3)
+            if abs((utc - paid_at).total_seconds()) < 2 * 86400:   # sanity: ignore absurd dates
+                paid_at = utc
+        except ValueError:
+            pass
+    sender_tail = ""
+    s = re.search(r"\(([0-9*+]{6,16})\)", t)
+    if s:
+        sender_tail = re.sub(r"\D", "", s.group(1))[-4:]
+    k = re.search(r"receipt\.ebirr\.com/[^/\s]+/([A-Za-z0-9_\-]{6,40})", t)
+    return {"ref": m.group(1).upper(), "alt_ref": k.group(1).upper() if k else "", "amount": amount,
+            "paid_at": paid_at, "sender_tail": sender_tail, "method": "Ebirr"}
+
+
+def parse_abyssinia_sms(text):
+    """Bank of Abyssinia credit SMS: 'your account 8*****98 was credited with ETB 25.00 from Telebirr by Reference XXXX ...
+    Receipt: https://cs.bankofabyssinia.com/slip/?trx=FT...'. Returns a dict or None."""
+    t = text or ""
+    a = re.search(r"credited\s+with\s+ETB\s*([\d,]+(?:\.\d+)?)", t, re.I)
+    if not a:
+        return None
+    try:
+        amount = float(a.group(1).replace(",", ""))
+    except ValueError:
+        return None
+    if amount <= 0:
+        return None
+    r = re.search(r"Reference\s*[:#]?\s*([A-Za-z0-9]{6,20})", t, re.I)
+    slip = re.search(r"slip/\?trx=([A-Za-z0-9]{8,30})", t)
+    main = r.group(1) if r else (slip.group(1) if slip else None)
+    if not main:
+        return None
+    alt = slip.group(1).upper() if (slip and r) else ""
+    return {"ref": main.upper(), "alt_ref": alt, "amount": amount, "paid_at": utc_now(),
+            "sender_tail": "", "method": "Abyssinia Bank"}
+
+
+def parse_incoming_sms(text):
+    """Telebirr, Ebirr or Bank of Abyssinia 'money received' SMS -> dict, otherwise None."""
+    t = text or ""
+    low = t.lower()
+    if "abyssinia" in low:
+        return parse_abyssinia_sms(t)
+    if re.search(r"(?<![a-z])ebirr", low):   # not 'Telebirr' (it contains 'ebirr' too)
+        return parse_ebirr_sms(t)
+    if "credited with" in low:
+        return parse_abyssinia_sms(t)
+    p = parse_telebirr_sms(t)
+    if p:
+        p.setdefault("alt_ref", "")
+        p.setdefault("method", "Telebirr")
+    return p
+
+
+def receipt_link(method, ref):
+    ref = ref or ""
+    if method == "Telebirr" and re.fullmatch(r"[A-Z0-9]{8,14}", ref):
+        return RECEIPT_URL + ref
+    if method == "Abyssinia Bank" and re.fullmatch(r"FT[A-Z0-9]{8,28}", ref):
+        return "https://cs.bankofabyssinia.com/slip/?trx=" + ref
+    return None
+
+
+def extract_reference(text, method="telebirr"):
+    """Transaction ID from what the player typed or pasted (the whole SMS, a receipt link or the bare ID).
+    Understands Telebirr, Ebirr and Bank of Abyssinia messages. Returns (ref, error_message_or_None)."""
     t = str(text or "").strip()
     if not t:
-        return "", "\u12a5\u1263\u12ad\u12ce \u12e8\u130d\u1265\u12ed\u1275 \u1241\u1325\u1229\u1295 \u12c8\u12ed\u121d \u12e8 SMS \u133d\u1201\u1349\u1295 \u12ed\u120b\u12a9\u1362"
-    m = re.search(r"\u1241\u1325\u122d\u12ce\s*([A-Za-z0-9]{8,14})", t)
-    if m and "\u120d\u12a8\u12cb\u120d" in t:
-        # a SENT-money SMS: the masked number in brackets is the receiver - it must be the owner's number
-        r = re.search(r"\(([0-9*+]{6,16})\)", t)
-        if r and re.sub(r"\D", "", r.group(1))[-4:] != PAY_TAIL:
-            return "", "\u12ed\u1205 \u12ad\u134d\u12eb \u12c8\u12f0 %s \u12e8\u1270\u120b\u12a8 \u12a0\u12ed\u1218\u1235\u120d\u121d\u1362 \u12a5\u1263\u12ad\u12ce \u12c8\u12f0 \u1275\u12ad\u12ad\u1208\u129b\u12cd \u1241\u1325\u122d \u12ed\u12ad\u1348\u1209\u1362" % PAY_NUMBER
-    if not m:
+        return "", "እባክዎ የግብይት ቁጥሩን ወይም የ SMS ጽሑፉን ይላኩ።"
+    ref = None
+    m = re.search(r"ቁጥርዎ\s*([A-Za-z0-9]{8,14})", t)
+    if m:
+        ref = m.group(1).upper()
+        if "ልከዋል" in t:
+            # a SENT-money Telebirr SMS: the masked number in brackets is the receiver - it must be the owner's number
+            r = re.search(r"\(([0-9*+]{6,16})\)", t)
+            if r and re.sub(r"\D", "", r.group(1))[-4:] != PAY_TAIL:
+                return "", "ይህ ክፍያ ወደ %s የተላከ አይመስልም። እባክዎ ወደ ትክክለኛው ቁጥር ይክፈሉ።" % PAY_NUMBER
+    if ref is None:
         m = re.search(r"/receipt/([A-Za-z0-9]{8,14})", t)
-    ref = m.group(1).upper() if m else clean_reference(t)
+        if m:
+            ref = m.group(1).upper()
+    if ref is None:
+        m = re.search(r"\bRef\s*[:#]?\s*(\d{6,16})", t, re.I)          # Ebirr
+        if m:
+            ref = m.group(1).upper()
+    if ref is None:
+        m = re.search(r"Reference\s*[:#]?\s*([A-Za-z0-9]{6,20})", t, re.I)   # Bank of Abyssinia
+        if m:
+            ref = m.group(1).upper()
+    if ref is None:
+        m = re.search(r"slip/\?trx=([A-Za-z0-9]{8,30})", t)             # Bank of Abyssinia receipt link
+        if m:
+            ref = m.group(1).upper()
+    if ref is None:
+        m = re.search(r"receipt\.ebirr\.com/[^/\s]+/([A-Za-z0-9_\-]{6,40})", t)   # Ebirr receipt link
+        if m:
+            ref = m.group(1).upper()
+    if ref is None:
+        ref = clean_reference(t)
     problem = reference_problem(ref)
     if problem:
         return "", problem
@@ -1370,34 +1646,35 @@ def notify_deposit(req_id, uid, method, amount, ref, note=None):
     phone = get_phone(uid)
     when = time.strftime("%Y-%m-%d %H:%M", time.gmtime(time.time() + 3 * 3600))  # Ethiopia time
     lines = [
-        "\U0001f4b0 \u12a0\u12f2\u1235 \u12e8\u1308\u1295\u12d8\u1265 \u121b\u1235\u1308\u1262\u12eb \u1325\u12eb\u1244 #%d" % req_id,
+        "💰 አዲስ የገንዘብ ማስገቢያ ጥያቄ #%d" % req_id,
         "",
-        "\u1270\u132b\u12cb\u127d: %s (ID %s)" % (display_name(uid), uid),
+        "ተጫዋች: %s (ID %s)" % (display_name(uid), uid),
     ]
     if phone:
-        lines.append("\u1235\u120d\u12ad: +%s" % phone)
+        lines.append("ስልክ: +%s" % phone)
     lines += [
-        "\u1263\u1295\u12ad: %s" % method,
-        "\u1218\u1320\u1295: %s \u1265\u122d" % money(amount),
+        "ባንክ: %s" % method,
+        "መጠን: %s ብር" % money(amount),
         "Transaction ID: %s" % ref,
-        "\u1230\u12d3\u1275: %s" % when,
+        "ሰዓት: %s" % when,
         "",
-        note or "\u26a0\ufe0f \u12a8 SMS \u130b\u122d \u12a0\u120d\u1270\u1323\u1218\u1228\u121d (\u1235\u120d\u12ad\u1205 \u120b\u12ed \u1308\u1293 \u12a0\u120d\u12f0\u1228\u1230 \u12ed\u1206\u1293\u120d)\u1362 \u12f0\u1228\u1230\u1299\u1295 \u12a0\u1228\u130b\u130d\u1325\u1362",
+        note or "⚠️ ከ SMS ጋር አልተጣመረም (ስልክህ ላይ ገና አልደረሰ ይሆናል)። ደረሰኙን አረጋግጥ።",
         "",
-        "\u2705 \u12a8\u121b\u133d\u12f0\u1245\u1205 \u1260\u134a\u1275 \u12a0\u1228\u130b\u130d\u1325:",
-        "1. \u1241\u1325\u1229 \u1260\u122b\u1235\u1205 \u12e8\u1274\u120c\u1265\u122d \u1273\u122a\u12ad/SMS \u12cd\u1235\u1325 \u12a0\u1208",
-        "2. \u1218\u1320\u1291 \u1260\u1275\u12ad\u12ad\u120d \u12ed\u1218\u1233\u1230\u120b\u120d (\u12e8\u12f0\u1228\u1230\u12cd \u1265\u122d \u1290\u12cd \u12e8\u121a\u1328\u1218\u1228\u12cd)",
-        "3. \u1201\u1294\u1273\u12cd \u00ab\u1270\u1233\u12ad\u1277\u120d\u00bb \u1290\u12cd",
-        "4. \u1241\u1325\u1229 \u12a8\u12da\u1205 \u1260\u134a\u1275 \u1260\u120c\u120b \u12f2\u1356\u12da\u1275 \u120b\u12ed \u12a0\u120d\u12cb\u1208\u121d",
+        "✅ ከማጽደቅህ በፊት አረጋግጥ:",
+        "1. ቁጥሩ በራስህ የ%s ታሪክ/SMS ውስጥ አለ" % method,
+        "2. መጠኑ በትክክል ይመሳሰላል (የደረሰው ብር ነው የሚጨመረው)",
+        "3. ሁኔታው «ተሳክቷል» ነው",
+        "4. ቁጥሩ ከዚህ በፊት በሌላ ዲፖዚት ላይ አልዋለም",
         "",
-        "\u26a0\ufe0f \u1235\u12ad\u122a\u1295\u123e\u1275 \u1265\u127b \u121b\u1235\u1228\u1303 \u12a0\u12ed\u12f0\u1208\u121d\u1362 \u12a0\u1320\u122b\u1323\u122a \u12a8\u1206\u1290 \u121d\u1295\u121d \u12a0\u1275\u132b\u1295\u1362",
+        "⚠️ ስክሪንሾት ብቻ ማስረጃ አይደለም። አጠራጣሪ ከሆነ ምንም አትጫን።",
     ]
     rows = []
-    if re.fullmatch(r"[A-Z0-9]{8,14}", ref or ""):
-        rows.append([InlineKeyboardButton("\U0001f517 \u12f0\u1228\u1230\u129d \u12ad\u1348\u1275", url=RECEIPT_URL + ref)])
+    link = receipt_link(method, ref)
+    if link:
+        rows.append([InlineKeyboardButton("🔗 ደረሰኝ ክፈት", url=link)])
     rows.append([
-        InlineKeyboardButton("\u2705 \u12a0\u133d\u12f5\u1245", callback_data="dep:approve:%d" % req_id),
-        InlineKeyboardButton("\u274c \u12cd\u12f5\u1245 \u12a0\u12f5\u122d\u130d", callback_data="dep:reject:%d" % req_id),
+        InlineKeyboardButton("✅ አጽድቅ", callback_data="dep:approve:%d" % req_id),
+        InlineKeyboardButton("❌ ውድቅ አድርግ", callback_data="dep:reject:%d" % req_id),
     ])
     notify_admins("\n".join(lines), InlineKeyboardMarkup(rows))
 
@@ -1415,7 +1692,7 @@ def approve_deposit(req_id, reviewer_id, via="admin", amount=None, paid_at=None)
             return None
         uid = row["user_id"]
         ref = (row["reference"] or "").replace(" ", "").upper()
-        inc = con.execute("SELECT * FROM incoming_payments WHERE ref=?", (ref,)).fetchone()
+        inc = find_incoming(con, ref)
         inc_free = inc is not None and not inc["used_by_req"]
         if amount is None and inc_free:
             amount, paid_at = inc["amount"], parse_db_time(inc["paid_at"])
@@ -1428,7 +1705,7 @@ def approve_deposit(req_id, reviewer_id, via="admin", amount=None, paid_at=None)
             (int(reviewer_id), amt, bonus, amt + bonus, via, req_id))
         con.execute("UPDATE users SET credits=credits+? WHERE user_id=?", (amt + bonus, uid))
         if inc_free:
-            con.execute("UPDATE incoming_payments SET used_by_req=? WHERE ref=?", (req_id, ref))
+            con.execute("UPDATE incoming_payments SET used_by_req=? WHERE id=?", (req_id, inc["id"]))
         u = con.execute("SELECT referred_by, referral_paid FROM users WHERE user_id=?", (uid,)).fetchone()
         if u and u["referred_by"] and not u["referral_paid"]:
             exists = con.execute("SELECT 1 FROM users WHERE user_id=?", (u["referred_by"],)).fetchone()
@@ -1478,32 +1755,47 @@ def auto_approve(req, amount, paid_at, sender_tail):
     return "approved" if approve_deposit(req["id"], 0, "sms", amount, paid_at) else "gone"
 
 
+def find_incoming(con, ref):
+    """An incoming payment whose main OR second reference number equals ref (a player may type either one)."""
+    ref = str(ref or "").replace(" ", "").upper()
+    if not ref:
+        return None
+    return con.execute("SELECT * FROM incoming_payments WHERE ref=? OR alt_ref=? ORDER BY id LIMIT 1", (ref, ref)).fetchone()
+
+
 def handle_incoming_sms(p):
-    """A Telebirr 'received' SMS came from the owner's phone. Remember it and match it to a pending request."""
+    """A 'money received' SMS (Telebirr / Ebirr / Bank of Abyssinia) came from the owner's phone.
+    Remember it and match it to a pending request."""
     ref = p["ref"]
+    alt = (p.get("alt_ref") or "").upper()
+    ids = [ref] + ([alt] if alt else [])
     with closing(db()) as con:
         con.execute("BEGIN IMMEDIATE")
-        if con.execute("SELECT 1 FROM incoming_payments WHERE ref=?", (ref,)).fetchone():
-            con.rollback()
-            return "duplicate"
-        con.execute("INSERT INTO incoming_payments(ref, amount, sender, paid_at) VALUES(?,?,?,?)",
-                    (ref, p["amount"], p.get("sender_tail") or "", fmt_db(p["paid_at"])))
+        for i in ids:
+            if find_incoming(con, i):
+                con.rollback()
+                return "duplicate"
+        con.execute("INSERT INTO incoming_payments(ref, alt_ref, method, amount, sender, paid_at) VALUES(?,?,?,?,?,?)",
+                    (ref, alt, p.get("method") or "Telebirr", p["amount"], p.get("sender_tail") or "", fmt_db(p["paid_at"])))
+        marks = ",".join("?" for _ in ids)
         req = con.execute(
-            "SELECT * FROM deposit_requests WHERE UPPER(REPLACE(reference,' ',''))=? AND status='pending' "
-            "ORDER BY id LIMIT 1", (ref,)).fetchone()
+            "SELECT * FROM deposit_requests WHERE UPPER(REPLACE(reference,' ','')) IN (%s) AND status='pending' "
+            "ORDER BY id LIMIT 1" % marks, tuple(ids)).fetchone()
         con.commit()
     if req is None:
         return "stored"   # the player has not sent his request yet; it is approved the moment he does
     return auto_approve(req, p["amount"], p["paid_at"], p.get("sender_tail"))
 
 
-def submit_deposit(uid, amt, ref):
+def submit_deposit(uid, amt, ref, method_key="telebirr"):
     """One deposit request from the bot chat or the Mini App. Returns (status, message):
     status 'approved' | 'pending' | 'error'."""
+    m = deposit_method(method_key) or DEPOSIT_METHODS[0]
+    label = m["label"]
     ref = str(ref or "").replace(" ", "").upper()
     if amt < MIN_DEPOSIT:
-        return "error", L(uid, "\u26a0\ufe0f \u12dd\u1245\u1270\u129b\u12cd \u1308\u1295\u12d8\u1265 \u121b\u1235\u1308\u1262\u12eb %d \u1265\u122d \u1290\u12cd\u1362" % MIN_DEPOSIT,
-                          "\u26a0\ufe0f The minimum deposit is %d ETB." % MIN_DEPOSIT)
+        return "error", L(uid, "⚠️ ዝቅተኛው የገንዘብ ማስገቢያ %d ብር ነው።" % MIN_DEPOSIT,
+                          "⚠️ The minimum deposit is %d ETB." % MIN_DEPOSIT)
     inc, req_id = None, None
     with closing(db()) as con:
         con.execute("BEGIN IMMEDIATE")  # check + insert as one step, so the same ID cannot slip in twice
@@ -1511,29 +1803,37 @@ def submit_deposit(uid, amt, ref):
                               (uid,)).fetchone()[0]
         if pending >= MAX_PENDING_DEPOSITS:
             con.rollback()
-            return "error", L(uid, "\u1265\u12d9 \u12eb\u120d\u1270\u1228\u130b\u1308\u1321 \u1325\u12eb\u1244\u12ce\u127d \u12a0\u1209\u12ce\u1275\u1362 \u12a0\u1235\u1270\u12f3\u12f3\u122a\u12cd \u12a5\u1235\u12aa\u12eb\u1228\u130b\u130d\u1325 \u12f5\u1228\u1235 \u12ed\u1320\u1265\u1241\u1362",
+            return "error", L(uid, "ብዙ ያልተረጋገጡ ጥያቄዎች አሉዎት። አስተዳዳሪው እስኪያረጋግጥ ድረስ ይጠብቁ።",
                               "You have too many unreviewed requests. Please wait for the administrator.")
-        used = con.execute("SELECT 1 FROM deposit_requests WHERE UPPER(REPLACE(reference,' ',''))=? "
-                           "AND status IN ('pending','approved')", (ref,)).fetchone()
+        found = find_incoming(con, ref)
+        ids = {ref}
+        if found is not None:
+            ids.add(found["ref"])
+            if found["alt_ref"]:
+                ids.add(found["alt_ref"])
+        marks = ",".join("?" for _ in ids)
+        used = con.execute("SELECT 1 FROM deposit_requests WHERE UPPER(REPLACE(reference,' ','')) IN (%s) "
+                           "AND status IN ('pending','approved')" % marks, tuple(ids)).fetchone()
         if used:
             con.rollback()
-            return "error", L(uid, "\u12ed\u1205 \u12e8\u130d\u1265\u12ed\u1275 \u1241\u1325\u122d \u1240\u12f0\u121d \u1232\u120d \u1270\u1218\u12dd\u130d\u1267\u120d\u1362 \u12a5\u1263\u12ad\u12ce \u1275\u12ad\u12ad\u1208\u129b\u12cd\u1295 \u1241\u1325\u122d \u12eb\u1235\u1308\u1261\u1362",
+            return "error", L(uid, "ይህ የግብይት ቁጥር ቀደም ሲል ተመዝግቧል። እባክዎ ትክክለኛውን ቁጥር ያስገቡ።",
                               "This transaction ID was already used. Please send the correct one.")
         cur = con.execute("INSERT INTO deposit_requests(user_id, method, amount, reference) VALUES(?,?,?,?)",
-                          (uid, "Telebirr", amt, ref))
+                          (uid, label, amt, ref))
         req_id = cur.lastrowid
-        inc = con.execute("SELECT * FROM incoming_payments WHERE ref=? AND used_by_req IS NULL", (ref,)).fetchone()
+        if found is not None and not found["used_by_req"]:
+            inc = found
         con.commit()
     if inc is not None:
         # the owner's phone already reported this payment: verify and approve at once
-        req = {"id": req_id, "user_id": uid, "method": "Telebirr", "amount": amt, "reference": ref}
+        req = {"id": req_id, "user_id": uid, "method": label, "amount": amt, "reference": ref}
         res = auto_approve(req, inc["amount"], parse_db_time(inc["paid_at"]), inc["sender"])
         if res == "approved":
-            return "approved", L(uid, "\u2705 \u12ad\u134d\u12eb\u12ce \u1270\u1228\u130b\u130d\u1327\u120d!", "\u2705 Your payment is confirmed!")
+            return "approved", L(uid, "✅ ክፍያዎ ተረጋግጧል!", "✅ Your payment is confirmed!")
     else:
-        notify_deposit(req_id, uid, "Telebirr", amt, ref)
-    return "pending", L(uid, "\u23f3 \u1325\u12eb\u1244\u12ce \u12f0\u122d\u1236\u1293\u120d\u1362 \u12ad\u134d\u12eb\u12cd \u1232\u1228\u130b\u1308\u1325 \u12c8\u12f2\u12eb\u12cd\u1291 \u12c8\u12f0 \u1202\u1233\u1265\u12ce \u12ed\u1328\u1218\u122b\u120d\u1362",
-                        "\u23f3 We received your request. It is added to your balance as soon as the payment is confirmed.")
+        notify_deposit(req_id, uid, label, amt, ref)
+    return "pending", L(uid, "⏳ ጥያቄዎ ደርሶናል። ክፍያው ሲረጋገጥ ወዲያውኑ ወደ ሂሳብዎ ይጨመራል።",
+                        "⏳ We received your request. It is added to your balance as soon as the payment is confirmed.")
 
 
 def review_deposit(req_id, decision, admin_id):
@@ -1555,41 +1855,69 @@ def review_deposit(req_id, decision, admin_id):
 
 # ---------------- promo codes ----------------
 def redeem_promo(uid, code):
-    """Returns (result, reward): ok | invalid | expired | used_up | already."""
+    """Returns (result, reward, extra): ok | invalid | expired | used_up | already | need_deposit."""
     code = re.sub(r"\s+", "", str(code or "")).upper()[:40]
     if not code:
-        return "invalid", 0
+        return "invalid", 0, None
     with closing(db()) as con:
         con.execute("BEGIN IMMEDIATE")
         p = con.execute("SELECT * FROM promo_codes WHERE code=?", (code,)).fetchone()
         if p is None or not p["active"]:
             con.rollback()
-            return "invalid", 0
+            return "invalid", 0, None
         if p["expires_at"] and p["expires_at"] < fmt_db(utc_now()):
             con.rollback()
-            return "expired", 0
+            return "expired", 0, None
         if p["max_uses"] and p["uses"] >= p["max_uses"]:
             con.rollback()
-            return "used_up", 0
+            return "used_up", 0, None
         if con.execute("SELECT 1 FROM promo_uses WHERE code=? AND user_id=?", (code, uid)).fetchone():
             con.rollback()
-            return "already", 0
+            return "already", 0, None
+        need = float(p["min_deposit"] or 0)
+        if need > 0:
+            have = float(con.execute(
+                "SELECT COALESCE(SUM(amount),0) FROM deposit_requests WHERE user_id=? AND status='approved'",
+                (uid,)).fetchone()[0])
+            if have + 1e-9 < need:
+                con.rollback()
+                return "need_deposit", 0, {"min": need, "have": have}
         con.execute("INSERT INTO promo_uses(code, user_id) VALUES(?,?)", (code, uid))
         con.execute("UPDATE promo_codes SET uses=uses+1 WHERE code=?", (code,))
         con.execute("UPDATE users SET credits=credits+? WHERE user_id=?", (p["reward"], uid))
         con.commit()
-        return "ok", float(p["reward"])
+        return "ok", float(p["reward"]), None
 
 
-def promo_message(uid, result, reward):
+def promo_message(uid, result, reward, extra=None):
     if result == "ok":
-        return L(uid, "\U0001f389 \u1270\u1233\u12ad\u1277\u120d! %s \u1265\u122d \u12c8\u12f0 \u1218\u132b\u12c8\u127b \u1202\u1233\u1265\u12ce \u1270\u1328\u121d\u122f\u120d\u1362" % money(reward),
-                 "\U0001f389 Done! %s ETB was added to your Play wallet." % money(reward))
+        return L(uid, "🎉 ተሳክቷል! %s ብር ወደ መጫወቻ ሂሳብዎ ተጨምሯል።" % money(reward),
+                 "🎉 Done! %s ETB was added to your Play wallet." % money(reward))
+    if result == "need_deposit":
+        extra = extra or {}
+        return L(uid, "🔒 ይህ ኮድ ባጠቃላይ %s ብር እና ከዚያ በላይ ገንዘብ ላስገቡ ተጫዋቾች ብቻ ነው።\nእስካሁን ያስገቡት: %s ብር።" % (money(extra.get("min", 0)), money(extra.get("have", 0))),
+                 "🔒 This code is only for players whose deposits total %s ETB or more.\nYou have deposited so far: %s ETB." % (money(extra.get("min", 0)), money(extra.get("have", 0))))
     return {
-        "expired": L(uid, "\u231b \u12ed\u1205 \u12ae\u12f5 \u130a\u12dc\u12cd \u12a0\u120d\u134e\u1260\u1273\u120d\u1362", "\u231b This code has expired."),
-        "used_up": L(uid, "\U0001f614 \u12ed\u1205 \u12ae\u12f5 \u1219\u1209 \u1260\u1219\u1209 \u1325\u1245\u121d \u120b\u12ed \u12cd\u120f\u120d\u1362", "\U0001f614 This code has been fully used."),
-        "already": L(uid, "\u2139\ufe0f \u12ed\u1205\u1295 \u12ae\u12f5 \u1240\u12f0\u121d \u1265\u1208\u12cd \u1270\u1320\u1245\u1218\u12cb\u120d\u1362", "\u2139\ufe0f You already used this code."),
-    }.get(result, L(uid, "\u274c \u12ae\u12f1 \u1275\u12ad\u12ad\u120d \u12a0\u12ed\u12f0\u1208\u121d\u1362 \u12a5\u1263\u12ad\u12ce \u12a5\u1295\u12f0\u1308\u1293 \u12ed\u121e\u12ad\u1229\u1362", "\u274c Invalid code. Please try again."))
+        "expired": L(uid, "⌛ ይህ ኮድ ጊዜው አልፏል።", "⌛ This code has expired."),
+        "used_up": L(uid, "😔 ይህ ኮድ ሙሉ በሙሉ ጥቅም ላይ ውሏል።", "😔 This code has been fully used."),
+        "already": L(uid, "ℹ️ ይህን ኮድ ቀደም ብለው ተጠቅመዋል።", "ℹ️ You already used this code."),
+    }.get(result, L(uid, "❌ ኮዱ ትክክል አይደለም። እባክዎ እንደገና ይሞክሩ።", "❌ Invalid code. Please try again."))
+
+
+def promo_announcement(p):
+    """Ready-to-send announcement text for a promo code (the owner sends it himself)."""
+    lines = ["🎁 የፕሮሞ ኮድ!", "", "🔑 ኮድ: %s" % p["code"], "💰 ሽልማት: %s ብር" % money(p["reward"])]
+    need = float(p.get("min_deposit") or 0)
+    if need > 0:
+        lines.append("✅ ለማን: ባጠቃላይ %s ብር እና ከዚያ በላይ ገንዘብ ላስገቡ ተጫዋቾች ብቻ" % money(need))
+    else:
+        lines.append("✅ ለማን: ለሁሉም ተጫዋች")
+    if p.get("max_uses"):
+        lines.append("👥 ለመጀመሪያዎቹ %d ሰዎች ብቻ" % int(p["max_uses"]))
+    if p.get("expires_at"):
+        lines.append("⏰ እስከ: %s" % (parse_db_time(p["expires_at"]) + timedelta(hours=3)).strftime("%Y-%m-%d"))
+    lines += ["", "📲 በቦቱ ውስጥ «🎁 ፕሮሞ ኮድ» ን ተጭነው ኮዱን ይላኩ።"]
+    return "\n".join(lines)
 
 
 # ---------------- claim bonuses (created by the admin, "first N people") ----------------
@@ -1746,7 +2074,7 @@ INDEX_HTML = r"""<!doctype html>
 <html lang="am"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="theme-color" content="#06180d"><title>&#x1260;&#x123D; &#x1260;&#x123D; &#x1262;&#x1295;&#x130E;</title><script src="https://telegram.org/js/telegram-web-app.js"></script><link rel="stylesheet" href="/static/style.css"></head>
 <body><main class="app-shell">
 <header class="topbar">
-  <div class="brand-info"><div class="eyebrow">&#x26A1; &#x1260;&#x123D; &#x1260;&#x123D; &#x1262;&#x1295;&#x130E; &#xB7; v12</div><h1 id="round-title">&#x12D9;&#x122D; #1</h1></div>
+  <div class="brand-info"><div class="eyebrow">&#x26A1; &#x1260;&#x123D; &#x1260;&#x123D; &#x1262;&#x1295;&#x130E; &#xB7; v13</div><h1 id="round-title">&#x12D9;&#x122D; #1</h1></div>
   <div class="top-scores">
     <div class="score-box"><span>PLAY</span><strong id="play-bal">0.00</strong></div>
     <div class="score-box win"><span>WIN</span><strong id="win-bal">0.00</strong></div>
@@ -1760,7 +2088,7 @@ INDEX_HTML = r"""<!doctype html>
 <section class="game-panel" id="selection-panel">
   <div class="section-header">
     <h2>&#x12E8;&#x12AB;&#x122D;&#x12F5; &#x1241;&#x1325;&#x122D; &#x12ED;&#x121D;&#x1228;&#x1321; (&#x12A8;1 &#x12A5;&#x1235;&#x12A8; 600)</h2>
-    <span class="card-count-pill" id="my-chosen-count">&#x12E8;&#x1270;&#x1218;&#x1228;&#x1321; &#x12AB;&#x122D;&#x12F6;&#x127D;: 0/4</span>
+    <span class="card-count-pill" id="my-chosen-count">&#x12E8;&#x1270;&#x1218;&#x1228;&#x1321; &#x12AB;&#x122D;&#x12F6;&#x127D;: 0/10</span>
   </div>
   <div class="master-grid" id="number-picker-grid"></div>
 </section>
@@ -1793,21 +2121,22 @@ INDEX_HTML = r"""<!doctype html>
   </div>
   <div id="deposit-form" class="sub-form">
     <h3>&#x1308;&#x1295;&#x12D8;&#x1265; &#x121B;&#x1235;&#x1308;&#x1263;&#x1275;</h3>
+    <select id="deposit-method"></select>
     <div class="pay-box">
-      <div>&#x1F4DE; <b id="pay-number">0928564065</b> <button id="copy-pay" class="copy-btn" type="button">&#x1245;&#x12F3;</button></div>
-      <div>&#x1F464; &#x1235;&#x121D;: <b id="pay-name">Eineyew</b> &#xB7; Telebirr</div>
+      <div>📞 <span id="pay-number-label">ስልክ ቁጥር</span>: <b id="pay-number">0928564065</b> <button id="copy-pay" class="copy-btn" type="button">ቅዳ</button></div>
+      <div>👤 ስም: <b id="pay-name">Eineyew</b> · <span id="pay-method-label">Telebirr</span></div>
     </div>
     <div id="bonus-banner" class="bonus-banner" style="display:none"></div>
     <input id="deposit-amount" type="number" placeholder="&#x1235;&#x1295;&#x1275; &#x1265;&#x122D;? (&#x1262;&#x12EB;&#x1295;&#x1235; 20)">
-    <input id="deposit-reference" placeholder="Transaction ID &#x12C8;&#x12ED;&#x121D; &#x12E8; SMS &#x133D;&#x1201;&#x134D;">
-    <div class="hint">1. &#x12A8;&#x120B;&#x12ED; &#x12C8;&#x12F3;&#x1208;&#x12CD; &#x1241;&#x1325;&#x122D; &#x1260; Telebirr &#x12ED;&#x12AD;&#x1348;&#x1209;&#x1362; 2. &#x12A8; Telebirr &#x12E8;&#x12F0;&#x1228;&#x1230;&#x12CE;&#x1275;&#x1295; &#x12E8;&#x130D;&#x1265;&#x12ED;&#x1275; &#x1241;&#x1325;&#x122D; (Transaction ID) &#x12C8;&#x12ED;&#x121D; &#x12E8; SMS &#x133D;&#x1201;&#x1349;&#x1295; &#x1219;&#x1209; &#x12EB;&#x1235;&#x1308;&#x1261;&#x1362; &#x12AD;&#x134D;&#x12EB;&#x12CD; &#x1232;&#x1228;&#x130B;&#x1308;&#x1325; &#x12C8;&#x12F2;&#x12EB;&#x12CD;&#x1291; &#x12C8;&#x12F0; &#x1202;&#x1233;&#x1265;&#x12CE; &#x12ED;&#x1328;&#x1218;&#x122B;&#x120D;&#x1362; &#x12DD;&#x1245;&#x1270;&#x129B;&#x12CD; 20 &#x1265;&#x122D; &#x1290;&#x12CD;&#x1364; &#x12EB;&#x1235;&#x1308;&#x1261;&#x1275; &#x1265;&#x122D; &#x1270;&#x1218;&#x120B;&#x123D; &#x12A0;&#x12ED;&#x12F0;&#x1228;&#x130D;&#x121D;&#x1362;</div>
+    <input id="deposit-reference" placeholder="Transaction ID / Ref ወይም የ SMS ጽሑፍ">
+    <div class="hint">1. ከላይ ወዳለው ቁጥር በመረጡት መንገድ (Telebirr / Abyssinia Bank / Ebirr) ይክፈሉ። 2. ከከፈሉ በኋላ የደረሰዎትን የግብይት ቁጥር (Transaction ID / Ref) ወይም የ SMS ጽሑፉን ሙሉ ያስገቡ። ክፍያው ሲረጋገጥ ወዲያውኑ ወደ ሂሳብዎ ይጨመራል። ዝቅተኛው 20 ብር ነው፤ ያስገቡት ብር ተመላሽ አይደረግም።</div>
     <button id="send-deposit" class="primary-btn btn-deposit">&#x1325;&#x12EB;&#x1244; &#x120B;&#x12AD;</button>
   </div>
   <div id="withdraw-form" class="sub-form" style="display:none;">
     <h3>&#x1308;&#x1295;&#x12D8;&#x1265; &#x121B;&#x12CD;&#x1323;&#x1275;</h3>
-    <input id="withdraw-account" placeholder="&#x12E8;&#x12A0;&#x12AB;&#x12CD;&#x1295;&#x1275; &#x1241;&#x1325;&#x122D; &#x12C8;&#x12ED;&#x121D; &#x1235;&#x120D;&#x12AD; &#x12A5;&#x1293; &#x1235;&#x121D;">
+    <input id="withdraw-account" placeholder="የ Telebirr ስልክ ቁጥር እና ስም (ለምሳሌ 0912345678 አበበ)">
     <input id="withdraw-amount" type="number" placeholder="&#x1218;&#x1320;&#x1295; (&#x1265;&#x122D;)">
-    <div class="hint">&#x12DD;&#x1245;&#x1270;&#x129B;&#x12CD; &#x12E8;&#x121B;&#x12CD;&#x132B; &#x1218;&#x1320;&#x1295; 100 &#x1265;&#x122D; &#x1290;&#x12CD;&#x1362; &#x12E8;&#x121A;&#x12C8;&#x1323;&#x12CD; &#x12A8;&#x12A0;&#x1238;&#x1293;&#x134A;&#x1290;&#x1275; (Win) &#x1202;&#x1233;&#x1265; &#x1265;&#x127B; &#x1290;&#x12CD;&#x1362;</div>
+    <div class="hint">ገንዘብ ማውጣት በ Telebirr ብቻ ነው። ዝቅተኛው የማውጫ መጠን 100 ብር ነው። የሚወጣው ከአሸናፊነት (Win) ሂሳብ ብቻ ነው።</div>
     <button id="send-withdraw" class="primary-btn btn-withdraw">&#x12E8;&#x121B;&#x12CD;&#x1323;&#x1275; &#x1325;&#x12EB;&#x1244; &#x120B;&#x12AD;</button>
   </div>
 </div>
@@ -1838,7 +2167,7 @@ INDEX_HTML = r"""<!doctype html>
         <ul>
           <li><b>&#x1219;&#x1209; &#x1260;&#x1219;&#x1209; &#x12E8;&#x12D5;&#x12F5;&#x120D; &#x1328;&#x12CB;&#x1273;&#x1366;</b> &#x1241;&#x1325;&#x122E;&#x1279; &#x1260;&#x12D8;&#x1348;&#x1240;&#x12F0; (&#x1260;&#x12D5;&#x1323;) &#x12ED;&#x1320;&#x122B;&#x1209;&#x1362; &#x1235;&#x1208;&#x12DA;&#x1205; &#x12E8;&#x1275;&#x129B;&#x12CD;&#x1295;&#x121D; &#x12D9;&#x122D; &#x12A5;&#x1295;&#x12F0;&#x121A;&#x12EB;&#x1238;&#x1295;&#x1349; &#x121D;&#x1295;&#x121D; &#x12CB;&#x1235;&#x1275;&#x1293; &#x12E8;&#x1208;&#x121D;&#x1362;</li>
           <li><b>&#x12A5;&#x12EB;&#x1295;&#x12F3;&#x1295;&#x12F1; &#x12D9;&#x122D; &#x1208;&#x1265;&#x127B;&#x12CD; &#x1290;&#x12CD;&#x1366;</b> &#x12A0;&#x1295;&#x12F5; &#x12D9;&#x122D; &#x12A8;&#x1240;&#x12F0;&#x1218;&#x12CD; &#x12D9;&#x122D; &#x130B;&#x122D; &#x130D;&#x1295;&#x1299;&#x1290;&#x1275; &#x12E8;&#x1208;&#x12CD;&#x121D;&#x1362; &#x1270;&#x12A8;&#x1273;&#x1273;&#x12ED; &#x123D;&#x1295;&#x1348;&#x1275; &#x1240;&#x1323;&#x12E9;&#x1295; &#x12D9;&#x122D; &#x121B;&#x1238;&#x1290;&#x134D; &#x12EB;&#x1235;&#x1308;&#x129B;&#x120D; &#x1265;&#x120E; &#x121B;&#x1230;&#x1265; &#x1235;&#x1205;&#x1270;&#x1275; &#x1290;&#x12CD;&#x1362;</li>
-          <li><b>&#x12AB;&#x122D;&#x12F5; &#x1218;&#x121D;&#x1228;&#x1325;&#x1366;</b> &#x12A8;1 &#x12A5;&#x1235;&#x12A8; 600 &#x12AB;&#x122D;&#x12F5; &#x1218;&#x121D;&#x1228;&#x1325; &#x12ED;&#x127B;&#x120B;&#x120D;&#x1364; &#x1262;&#x1260;&#x12DB; 4 &#x12AB;&#x122D;&#x12F5; &#x12ED;&#x1348;&#x1240;&#x12F3;&#x120D;&#x1362; &#x12E8;&#x12A0;&#x1295;&#x12F5; &#x12AB;&#x122D;&#x12F5; &#x12CB;&#x130B; 10 &#x1265;&#x122D; &#x1290;&#x12CD;&#x1362; &#x12E8;&#x1218;&#x121D;&#x1228;&#x132B;&#x12CD; &#x130A;&#x12DC; 50 &#x1230;&#x12A8;&#x1295;&#x12F5; &#x1232;&#x1206;&#x1295; &#x12A8;&#x12DA;&#x12EB; &#x1260;&#x128B;&#x120B; &#x12D9;&#x1229; &#x12ED;&#x1300;&#x121D;&#x122B;&#x120D;&#x1362;</li>
+          <li><b>&#x12AB;&#x122D;&#x12F5; &#x1218;&#x121D;&#x1228;&#x1325;&#x1366;</b> &#x12A8;1 &#x12A5;&#x1235;&#x12A8; 600 &#x12AB;&#x122D;&#x12F5; &#x1218;&#x121D;&#x1228;&#x1325; &#x12ED;&#x127B;&#x120B;&#x120D;&#x1364; &#x1262;&#x1260;&#x12DB; 10 &#x12AB;&#x122D;&#x12F5; &#x12ED;&#x1348;&#x1240;&#x12F3;&#x120D;&#x1362; &#x12E8;&#x12A0;&#x1295;&#x12F5; &#x12AB;&#x122D;&#x12F5; &#x12CB;&#x130B; 10 &#x1265;&#x122D; &#x1290;&#x12CD;&#x1362; &#x12E8;&#x1218;&#x121D;&#x1228;&#x132B;&#x12CD; &#x130A;&#x12DC; 50 &#x1230;&#x12A8;&#x1295;&#x12F5; &#x1232;&#x1206;&#x1295; &#x12A8;&#x12DA;&#x12EB; &#x1260;&#x128B;&#x120B; &#x12D9;&#x1229; &#x12ED;&#x1300;&#x121D;&#x122B;&#x120D;&#x1362;</li>
           <li><b>&#x12E8;&#x1202;&#x1233;&#x1265; &#x12A0;&#x12A8;&#x134B;&#x1348;&#x120D;&#x1366;</b> &#x1208;&#x12AB;&#x122D;&#x12F5; &#x12AD;&#x134D;&#x12EB; &#x1218;&#x1300;&#x1218;&#x122A;&#x12EB; &#x12E8;&#x1218;&#x132B;&#x12C8;&#x127B; (Play) &#x1202;&#x1233;&#x1265;&#x12CE; &#x12ED;&#x1240;&#x1290;&#x1233;&#x120D;&#x1364; &#x12A5;&#x1231; &#x1232;&#x12EB;&#x120D;&#x1245; &#x12A8;&#x12A0;&#x1238;&#x1293;&#x134A;&#x1290;&#x1275; (Win) &#x1202;&#x1233;&#x1265;&#x12CE; &#x12ED;&#x1240;&#x1290;&#x1233;&#x120D;&#x1362;</li>
           <li><b>&#x12A0;&#x1238;&#x1293;&#x134A; &#x1218;&#x1208;&#x12E8;&#x1275;&#x1366;</b> &#x121B;&#x1238;&#x1290;&#x134A;&#x12EB;&#x12CD;&#x1295; &#x1328;&#x12CB;&#x1273;&#x12CD; &#x1260;&#x122B;&#x1231; &#x12EB;&#x12CD;&#x1243;&#x120D;&#x1362; &#x12E8;&#x12A0;&#x1238;&#x1293;&#x134A;&#x12CD; &#x1235;&#x121D;&#x1363; &#x12E8;&#x12AB;&#x122D;&#x12F5; &#x1241;&#x1325;&#x122D; &#x12A5;&#x1293; &#x123D;&#x120D;&#x121B;&#x1275; &#x12C8;&#x12F2;&#x12EB;&#x12CD;&#x1291; &#x1208;&#x1201;&#x1209;&#x121D; &#x12ED;&#x1273;&#x12EB;&#x120D;&#x1362; &#x1265;&#x12D9; &#x1270;&#x132B;&#x12CB;&#x127E;&#x127D; &#x1260;&#x12A0;&#x1295;&#x12F5; &#x130A;&#x12DC; &#x12AB;&#x1238;&#x1290;&#x1349; &#x123D;&#x120D;&#x121B;&#x1271; &#x1260;&#x12A5;&#x12A9;&#x120D; &#x12ED;&#x12AB;&#x1348;&#x120B;&#x120D;&#x1362;</li>
         </ul>
@@ -1896,6 +2225,7 @@ ADMIN_HTML = r"""<!doctype html><html lang="am"><head><meta charset="utf-8"><met
 <h2>&#x1F3F7; &#x1355;&#x122E;&#x121E; &#x12AE;&#x12F6;&#x127D;</h2>
 <div class="rule-card"><div class="grid2"><input type="text" id="pc-code" placeholder="&#x12AE;&#x12F5;"><input type="number" id="pc-reward" placeholder="&#x123D;&#x120D;&#x121B;&#x1275; (&#x1265;&#x122D;)"></div>
 <div class="grid2"><input type="number" id="pc-max" placeholder="&#x12A8;&#x134D;&#x1270;&#x129B; &#x1270;&#x1320;&#x1243;&#x121A; &#x1265;&#x12DB;&#x1275; (0 = &#x12EB;&#x120D;&#x1270;&#x12C8;&#x1230;&#x1290;)"><input type="date" id="pc-exp" title="&#x12E8;&#x121A;&#x12EB;&#x1260;&#x1243;&#x1260;&#x1275; &#x1240;&#x1295;"></div>
+<div><input type="number" id="pc-min" placeholder="ዝቅተኛ ጠቅላላ ተቀማጭ (ብር) — ለምሳሌ 100፣ 150፣ 200 (0 = ለሁሉም)"></div>
 <button id="pc-save" class="primary-btn">&#x1F4BE; &#x12AE;&#x12F1;&#x1295; &#x12A0;&#x1235;&#x1240;&#x121D;&#x1325;</button></div><div id="promo-list"></div>
 <h2>&#x1F517; &#x122A;&#x1348;&#x122B;&#x120D;</h2><div id="ref-box"></div>
 <script src="/static/admin.js"></script></body></html>"""
@@ -2105,6 +2435,23 @@ async function api(path, method = 'GET', body = null) {
   return d;
 }
 
+let depKey = null;
+function renderPayBox() {
+  const ms = model.deposit_methods || [];
+  const sel = document.getElementById('deposit-method');
+  if (!sel || !ms.length) return;
+  if (sel.options.length !== ms.length) {
+    sel.innerHTML = '';
+    ms.forEach(m => { const o = document.createElement('option'); o.value = m.key; o.textContent = m.label; sel.appendChild(o); });
+    if (depKey) sel.value = depKey;
+  }
+  depKey = sel.value || ms[0].key;
+  const m = ms.find(x => x.key === depKey) || ms[0];
+  document.getElementById('pay-number').textContent = m.number;
+  document.getElementById('pay-name').textContent = m.name;
+  document.getElementById('pay-number-label').textContent = m.number_label || '';
+  document.getElementById('pay-method-label').textContent = m.label;
+}
 function render() {
   if (!model) return;
   const isBingo = tab === 'bingo';
@@ -2115,10 +2462,7 @@ function render() {
   document.getElementById('win-bal').textContent = (model.win_credits || 0).toFixed(2);
   document.getElementById('w-play').textContent = model.credits.toFixed(2);
   document.getElementById('w-win').textContent = (model.win_credits || 0).toFixed(2);
-  if (model.pay_number) {
-    document.getElementById('pay-number').textContent = model.pay_number;
-    document.getElementById('pay-name').textContent = model.pay_name;
-  }
+  renderPayBox();
   const bb = document.getElementById('bonus-banner');
   if (bb) {
     if (model.bonus_percent > 0) {
@@ -2162,7 +2506,7 @@ function render() {
   } else {
     banner.style.display = 'none';
   }
-  document.getElementById('my-chosen-count').textContent = '\u12E8\u1270\u1218\u1228\u1321 \u12AB\u122D\u12F6\u127D: ' + model.my_cards.length + '/4';
+  document.getElementById('my-chosen-count').textContent = '\u12E8\u1270\u1218\u1228\u1321 \u12AB\u122D\u12F6\u127D: ' + model.my_cards.length + '/' + (model.max_cards || 10);
   document.getElementById('card-count').textContent = '\u12AB\u122D\u12F6\u127D: ' + model.my_cards.length;
 
   // 1..600 card picker
@@ -2332,6 +2676,7 @@ function walletView(which) {
 }
 document.getElementById('show-deposit').onclick = () => walletView('deposit');
 document.getElementById('show-withdraw').onclick = () => walletView('withdraw');
+document.getElementById('deposit-method').onchange = () => { depKey = document.getElementById('deposit-method').value; renderPayBox(); };
 document.getElementById('copy-pay').onclick = () => {
   const n = document.getElementById('pay-number').textContent;
   try { navigator.clipboard.writeText(n).then(() => toast('\u1270\u1240\u12F5\u1277\u120D'), () => toast(n)); } catch (e) { toast(n); }
@@ -2341,7 +2686,7 @@ document.getElementById('send-deposit').onclick = () => {
   const reference = document.getElementById('deposit-reference').value.trim();
   if (!amount || reference.length < 3) { toast('\u12A5\u1263\u12AD\u12CE \u1218\u1228\u1303\u12CD\u1295 \u12ED\u1219\u1209'); return; }
   if (amount < 20) { toast('\u12DD\u1245\u1270\u129B\u12CD \u1308\u1295\u12D8\u1265 \u121B\u1235\u1308\u1262\u12EB 20 \u1265\u122D \u1290\u12CD'); return; }
-  action('/api/miniapp/deposit-request', { amount, method: 'Telebirr', reference })
+  action('/api/miniapp/deposit-request', { amount, method: (document.getElementById('deposit-method') || {}).value || 'telebirr', reference })
     .then(() => { document.getElementById('deposit-reference').value = ''; });
 };
 document.getElementById('send-withdraw').onclick = () => {
@@ -2491,18 +2836,66 @@ function ethUpd(i) {
   const s = toMin(document.getElementById('r' + i + '-s').value, false), e = toMin(document.getElementById('r' + i + '-e').value, true);
   document.getElementById('r' + i + '-eth').textContent = '\uD83D\uDD52 ' + ethTime(s) + ' \u2192 ' + ethTime(e % 1440);
 }
+const ETH_PERIODS = [['morning', 'ጠዋት'], ['afternoon', 'ከቀኑ'], ['evening', 'ምሽት'], ['night', 'ሌሊት']];
+const ETH_HOURS = {morning: [12, 1, 2, 3, 4, 5], afternoon: [6, 7, 8, 9, 10, 11], evening: [12, 1, 2, 3, 4, 5], night: [6, 7, 8, 9, 10, 11]};
+function minToEth(min) {
+  const h = Math.floor(min / 60) % 24, m = min % 60;
+  let eh = ((h - 6) % 12 + 12) % 12; if (eh === 0) eh = 12;
+  const p = (h >= 6 && h < 12) ? 'morning' : (h >= 12 && h < 18) ? 'afternoon' : (h >= 18 ? 'evening' : 'night');
+  return {p, eh, m};
+}
+function ethToMin(p, eh, m) {
+  const base = {morning: 6, afternoon: 12, evening: 18, night: 0}[p];
+  const first = (p === 'morning' || p === 'evening') ? 0 : 6;
+  const off = (((eh % 12) - first) % 12 + 12) % 12;
+  return (base + off) * 60 + m;
+}
+function ethMinOpts(cur) {
+  const list = []; for (let k = 0; k < 60; k += 5) list.push(k);
+  if (!list.includes(cur)) list.push(cur);
+  list.sort((a, b) => a - b);
+  return list.map(k => `<option value="${k}" ${k === cur ? 'selected' : ''}>${String(k).padStart(2, '0')}</option>`).join('');
+}
+function ethSel(i, w, min) {
+  const e = minToEth(min);
+  const per = ETH_PERIODS.map(x => `<option value="${x[0]}" ${x[0] === e.p ? 'selected' : ''}>${x[1]}</option>`).join('');
+  const hrs = ETH_HOURS[e.p].map(h => `<option value="${h}" ${h === e.eh ? 'selected' : ''}>${h}</option>`).join('');
+  return `<div style="display:flex;gap:4px"><select id="r${i}-${w}-p" onchange="ethPeriod(${i},'${w}')">${per}</select>` +
+    `<select id="r${i}-${w}-h" onchange="ethSync(${i},'${w}')">${hrs}</select>` +
+    `<select id="r${i}-${w}-m" onchange="ethSync(${i},'${w}')">${ethMinOpts(e.m)}</select></div>`;
+}
+function ethPeriod(i, w) {
+  const p = document.getElementById('r' + i + '-' + w + '-p').value;
+  document.getElementById('r' + i + '-' + w + '-h').innerHTML = ETH_HOURS[p].map(h => `<option value="${h}">${h}</option>`).join('');
+  ethSync(i, w);
+}
+function ethSync(i, w) {
+  const g = id => document.getElementById('r' + i + '-' + w + '-' + id);
+  const min = ethToMin(g('p').value, Number(g('h').value), Number(g('m').value));
+  document.getElementById('r' + i + '-' + w).value = hhmm(min);
+  ethUpd(i);
+}
+function stdSync(i, w) {
+  const v = document.getElementById('r' + i + '-' + w).value;
+  const e = minToEth(toMin(v, w === 'e'));
+  document.getElementById('r' + i + '-' + w + '-p').value = e.p;
+  document.getElementById('r' + i + '-' + w + '-h').innerHTML = ETH_HOURS[e.p].map(h => `<option value="${h}" ${h === e.eh ? 'selected' : ''}>${h}</option>`).join('');
+  document.getElementById('r' + i + '-' + w + '-m').innerHTML = ethMinOpts(e.m);
+  ethUpd(i);
+}
 function ruleCard(r, i) {
   const days = String(r.days || '').split(',').filter(x => x !== '').map(Number);
   const dayBoxes = DAYN.map((n, d) => `<label class="d"><input type="checkbox" class="r${i}-d" value="${d}" ${days.includes(d) ? 'checked' : ''}> ${n}</label>`).join('');
-  return `<div class="rule-card"><input type="text" id="r${i}-n" placeholder="\u1235\u121D" value="${esc(r.name)}">` +
-    `<div>${dayBoxes}<div class="eth">\u121D\u1295\u121D \u1240\u1295 \u12AB\u120D\u1270\u1218\u1228\u1320 \u1260\u1201\u1209\u121D \u1240\u1293\u1275 \u12ED\u1220\u122B\u120D</div></div>` +
-    `<div class="grid2"><div>\u12A8 (\u1218\u12F0\u1260\u129B \u1230\u12D3\u1275)<input type="time" id="r${i}-s" value="${hhmm(r.start_min)}" oninput="ethUpd(${i})"></div>` +
-    `<div>\u12A5\u1235\u12A8<input type="time" id="r${i}-e" value="${hhmm(r.end_min % 1440)}" oninput="ethUpd(${i})"></div></div><div class="eth" id="r${i}-eth"></div>` +
-    `<div class="grid2"><div>\u1266\u1290\u1235 %<input type="number" id="r${i}-p" value="${Number(r.percent)}"></div>` +
-    `<div>\u12A8\u134D\u1270\u129B (\u1265\u122D, 0 = \u1308\u12F0\u1265 \u12E8\u1208\u121D)<input type="number" id="r${i}-c" value="${Number(r.cap)}"></div></div>` +
-    `<label><input type="checkbox" id="r${i}-a" ${r.active ? 'checked' : ''}> \u1295\u1241</label> ` +
-    `<button onclick="saveRule(${i})" style="${BTN}background:#39d66f">\uD83D\uDCBE \u12A0\u1235\u1240\u121D\u1325</button>` +
-    (r.id ? `<button onclick="delRule(${i})" style="${BTN}background:#d63939;color:#fff">\uD83D\uDDD1 \u1230\u122D\u12DD</button>` : '') + `</div>`;
+  return `<div class="rule-card"><input type="text" id="r${i}-n" placeholder="ስም" value="${esc(r.name)}">` +
+    `<div>${dayBoxes}<div class="eth">ምንም ቀን ካልተመረጠ በሁሉም ቀናት ይሰራል</div></div>` +
+    `<div class="grid2"><div>ከ (የኢትዮጵያ ሰዓት)${ethSel(i, 's', r.start_min)}</div><div>እስከ (የኢትዮጵያ ሰዓት)${ethSel(i, 'e', r.end_min)}</div></div>` +
+    `<div class="grid2"><div>ከ (መደበኛ ሰዓት)<input type="time" id="r${i}-s" value="${hhmm(r.start_min)}" oninput="stdSync(${i},'s')"></div>` +
+    `<div>እስከ (መደበኛ ሰዓት)<input type="time" id="r${i}-e" value="${hhmm(r.end_min % 1440)}" oninput="stdSync(${i},'e')"></div></div><div class="eth" id="r${i}-eth"></div>` +
+    `<div class="grid2"><div>ቦነስ %<input type="number" id="r${i}-p" value="${Number(r.percent)}"></div>` +
+    `<div>ከፍተኛ (ብር, 0 = ገደብ የለም)<input type="number" id="r${i}-c" value="${Number(r.cap)}"></div></div>` +
+    `<label><input type="checkbox" id="r${i}-a" ${r.active ? 'checked' : ''}> ንቁ</label> ` +
+    `<button onclick="saveRule(${i})" style="${BTN}background:#39d66f">💾 አስቀምጥ</button>` +
+    (r.id ? `<button onclick="delRule(${i})" style="${BTN}background:#d63939;color:#fff">🗑 ሰርዝ</button>` : '') + `</div>`;
 }
 let RULES = [];
 function renderRules(list) {
@@ -2524,20 +2917,49 @@ document.getElementById('add-rule').onclick = () => {
 };
 document.getElementById('pc-save').onclick = async () => {
   const ok = await postJson('/api/admin/promo', {code: document.getElementById('pc-code').value, reward: Number(document.getElementById('pc-reward').value),
-    max_uses: Number(document.getElementById('pc-max').value || 0), expires: document.getElementById('pc-exp').value});
-  if (ok) { ['pc-code', 'pc-reward', 'pc-max', 'pc-exp'].forEach(x => document.getElementById(x).value = ''); loadSettings(); }
+    max_uses: Number(document.getElementById('pc-max').value || 0), min_deposit: Number(document.getElementById('pc-min').value || 0),
+    expires: document.getElementById('pc-exp').value});
+  if (ok) { ['pc-code', 'pc-reward', 'pc-max', 'pc-min', 'pc-exp'].forEach(x => document.getElementById(x).value = ''); loadSettings(); }
 };
-async function promoAct(code, what) {
-  if (what === 'delete' && !confirm('\u12AE\u12F1 \u12ED\u1230\u1228\u12DD?')) return;
+let PROMOS = [];
+async function promoAct(i, what) {
+  const code = PROMOS[i].code;
+  if (what === 'delete' && !confirm('ኮዱ ይሰረዝ?')) return;
   if (await postJson('/api/admin/promo', {code, [what]: true})) loadSettings();
 }
+function showPromoAnn(i) {
+  const box = document.getElementById('pu-' + i);
+  if (box.dataset.k === 'ann') { box.innerHTML = ''; box.dataset.k = ''; return; }
+  box.dataset.k = 'ann';
+  box.innerHTML = `<textarea readonly rows="9" style="width:100%;margin-top:6px" id="pa-${i}">${esc(PROMOS[i].announcement)}</textarea>` +
+    `<button onclick="copyAnn(${i})" style="${BTN}background:#39d66f">📋 ቅዳ</button>`;
+}
+function copyAnn(i) {
+  const ta = document.getElementById('pa-' + i); ta.select();
+  try { navigator.clipboard.writeText(ta.value); } catch (e) { try { document.execCommand('copy'); } catch (e2) {} }
+}
+async function showPromoUsers(i) {
+  const box = document.getElementById('pu-' + i);
+  if (box.dataset.k === 'users') { box.innerHTML = ''; box.dataset.k = ''; return; }
+  box.dataset.k = 'users'; box.textContent = '...';
+  const r = await fetch('/api/admin/promo-uses?code=' + encodeURIComponent(PROMOS[i].code), {headers: HEADERS()});
+  const d = await r.json();
+  if (!r.ok) { box.textContent = d.error || 'Error'; return; }
+  box.innerHTML = `<p><b>ወሰዱት: ${Number(d.count)} ሰዎች</b></p>` + (d.users || []).map(u =>
+    `<div class="pl">${esc(u.name)} (ID ${esc(u.user_id)}) · ${esc(fmtTime(u.at))}</div>`).join('');
+}
 function renderPromos(list) {
-  document.getElementById('promo-list').innerHTML = list.map(p =>
-    `<div class="req"><b>${esc(p.code)}</b> \u00B7 ${birr(p.reward)} \u1265\u122D ${p.active ? '\u2705' : '\u23F8'}` +
-    `<p>\u1325\u1245\u121D \u120B\u12ED \u12E8\u12CB\u1208: ${Number(p.uses)}${p.max_uses ? ' / ' + Number(p.max_uses) : ' (\u12EB\u120D\u1270\u12C8\u1230\u1290)'}` +
-    (p.expires_at ? ` \u00B7 \u12A5\u1235\u12A8: ${esc(fmtTime(p.expires_at))}` : '') + `</p>` +
-    `<button onclick="promoAct('${esc(p.code)}','toggle')" style="${BTN}background:#ffe629">${p.active ? '\u12A0\u1241\u121D' : '\u12A0\u1235\u1300\u121D\u122D'}</button>` +
-    `<button onclick="promoAct('${esc(p.code)}','delete')" style="${BTN}background:#d63939;color:#fff">\uD83D\uDDD1</button></div>`).join('') || '\u2014';
+  PROMOS = list;
+  document.getElementById('promo-list').innerHTML = list.map((p, i) =>
+    `<div class="req"><b>${esc(p.code)}</b> · ${birr(p.reward)} ብር ${p.active ? '✅' : '⏸'}` +
+    `<p>የተጠቀሙ: ${Number(p.uses)}${p.max_uses ? ' / ' + Number(p.max_uses) : ' (ያልተወሰነ)'}` +
+    (Number(p.min_deposit) > 0 ? ` · 🔒 ባጠቃላይ ${birr(p.min_deposit)} ብር+ ላስገቡ ብቻ` : ' · ለሁሉም') +
+    (p.expires_at ? ` · እስከ: ${esc(fmtTime(p.expires_at))}` : '') + `</p>` +
+    `<button onclick="promoAct(${i},'toggle')" style="${BTN}background:#ffe629">${p.active ? 'አቁም' : 'አስጀምር'}</button>` +
+    `<button onclick="showPromoUsers(${i})" style="${BTN}background:#102d19;color:#f4f7f4;border:1px solid #20552d">👥 ማን ወሰደ</button>` +
+    `<button onclick="showPromoAnn(${i})" style="${BTN}background:#102d19;color:#f4f7f4;border:1px solid #20552d">📣 ማስታወቂያ ጽሑፍ</button>` +
+    `<button onclick="promoAct(${i},'delete')" style="${BTN}background:#d63939;color:#fff">🗑</button>` +
+    `<div id="pu-${i}"></div></div>`).join('') || '—';
 }
 function renderSms(s, incoming) {
   document.getElementById('sms-box').innerHTML =
@@ -2760,7 +3182,7 @@ def api_miniapp_select_card():
             return jsonify({"message": "\u12ab\u122d\u12f1 \u1270\u1230\u122d\u12df\u120d"})
 
         if len(my_cards) >= MAX_CARDS_PER_PLAYER:
-            return json_error("\u12a84 \u12ab\u122d\u12f5 \u1260\u120b\u12ed \u1218\u12eb\u12dd \u12a0\u12ed\u127d\u120d\u121d")
+            return json_error("ከ%d ካርድ በላይ መያዝ አይችሉም" % MAX_CARDS_PER_PLAYER)
         if card_num in game_state["taken_card_numbers"]:
             return json_error("\u12ed\u1205 \u12ab\u122d\u12f5 \u1260\u120c\u120b \u1270\u132b\u12cb\u127d \u1270\u12ed\u12df\u120d")
 
@@ -2835,11 +3257,14 @@ def api_miniapp_deposit():
     body = request.get_json(silent=True) or {}
     amt = to_positive_float(body.get("amount"))
     if not amt:
-        return json_error("\u12a5\u1263\u12ad\u12ce \u1218\u1228\u1303\u12cd\u1295 \u12ed\u1219\u1209")
-    ref, err = extract_reference(str(body.get("reference") or "")[:800])
+        return json_error("እባክዎ መረጃውን ይሙሉ")
+    m = deposit_method(body.get("method") or "telebirr")
+    if m is None or not m["number"]:
+        m = DEPOSIT_METHODS[0]
+    ref, err = extract_reference(str(body.get("reference") or "")[:800], m["key"])
     if err:
         return json_error(err)
-    status, message = submit_deposit(user["id"], amt, ref)
+    status, message = submit_deposit(user["id"], amt, ref, m["key"])
     if status == "error":
         return json_error(message)
     return jsonify({"message": message})
@@ -2853,22 +3278,10 @@ def api_miniapp_withdraw():
     body = request.get_json(silent=True) or {}
     amt = to_positive_float(body.get("amount"))
     account_info = str(body.get("account_info") or "").strip()[:200]
-    if not amt or not account_info:
-        return json_error("\u12a5\u1263\u12ad\u12ce \u1218\u1228\u1303\u12cd\u1295 \u12ed\u1219\u1209")
-    if amt < MIN_WITHDRAW:
-        return json_error("\u12dd\u1245\u1270\u129b\u12cd \u12e8\u121b\u12cd\u132b \u1218\u1320\u1295 %d \u1265\u122d \u1290\u12cd\u1362" % MIN_WITHDRAW)
-    with game_lock:  # serialize balance check + deduction
-        row = get_user(user["id"])
-        if (row["win_credits"] if row else 0.0) < amt:
-            return json_error("\u1260\u12a0\u1238\u1293\u134a\u1290\u1275 \u1202\u1233\u1265\u12ce (Win Wallet) \u12cd\u1235\u1325 \u1260\u1242 \u1308\u1295\u12d8\u1265 \u12e8\u1208\u121d")
-        update_credits(user["id"], -amt, is_win=True)
-        with closing(db()) as con:
-            cur = con.execute("INSERT INTO withdraw_requests(user_id, account_info, amount) VALUES(?,?,?)",
-                              (user["id"], account_info, amt))
-            req_id = cur.lastrowid
-            con.commit()
-    notify_withdraw(req_id, user["id"], account_info, amt)
-    return jsonify({"message": "\u12e8\u1308\u1295\u12d8\u1265 \u121b\u12cd\u132b \u1325\u12eb\u1244\u12ce \u1270\u120d\u12b3\u120d"})
+    ok, message = create_withdraw(user["id"], amt, account_info)
+    if not ok:
+        return json_error(message)
+    return jsonify({"message": message})
 
 
 @app.get("/api/miniapp/rank")
@@ -3041,11 +3454,11 @@ def sms_webhook():
     def done(payload):
         return jsonify(payload) if as_json else Response("OK", content_type="text/plain; charset=utf-8")
 
-    if SMS_SENDER and sender and sender.strip().lower() != SMS_SENDER.lower():
+    if SMS_SENDERS and sender and sender.strip().lower() not in SMS_SENDERS:
         return done({"ok": True, "ignored": "sender"})
-    parsed = parse_telebirr_sms(text)
+    parsed = parse_incoming_sms(text)
     if not parsed:
-        return done({"ok": True, "ignored": "not an incoming Telebirr payment"})
+        return done({"ok": True, "ignored": "not an incoming payment SMS"})
     try:
         result = handle_incoming_sms(parsed)
     except Exception:
@@ -3071,6 +3484,8 @@ def admin_settings():
         recent = con.execute(
             "SELECT user_id, referred_by, referral_paid, created_at FROM users WHERE referred_by IS NOT NULL "
             "ORDER BY created_at DESC LIMIT 20").fetchall()
+    for _p in promos:
+        _p["announcement"] = promo_announcement(_p)
     top = [dict(r, name=display_name(r["inviter"])) for r in top]
     recent = [dict(r, name=display_name(r["user_id"]), inviter_name=display_name(r["referred_by"])) for r in recent]
     url = (PUBLIC_URL + "/api/sms-webhook?key=" + SMS_SECRET) if (SMS_SECRET and PUBLIC_URL) else ""
@@ -3137,6 +3552,7 @@ def admin_promo():
         try:
             reward = float(b.get("reward"))
             max_uses = int(b.get("max_uses") or 0)
+            min_deposit = max(0.0, float(b.get("min_deposit") or 0))
         except (TypeError, ValueError):
             return json_error("\u1275\u12ad\u12ad\u120d \u12eb\u120d\u1206\u1290 \u1218\u1228\u1303")
         if reward <= 0 or max_uses < 0:
@@ -3149,11 +3565,26 @@ def admin_promo():
             except ValueError:
                 return json_error("\u1240\u1291 \u1275\u12ad\u12ad\u120d \u12a0\u12ed\u12f0\u1208\u121d")
         con.execute(
-            "INSERT INTO promo_codes(code, reward, max_uses, expires_at, active) VALUES(?,?,?,?,1) "
+            "INSERT INTO promo_codes(code, reward, max_uses, expires_at, min_deposit, active) VALUES(?,?,?,?,?,1) "
             "ON CONFLICT(code) DO UPDATE SET reward=excluded.reward, max_uses=excluded.max_uses, "
-            "expires_at=excluded.expires_at, active=1", (code, reward, max_uses, expires))
+            "expires_at=excluded.expires_at, min_deposit=excluded.min_deposit, active=1",
+            (code, reward, max_uses, expires, min_deposit))
         con.commit()
     return jsonify({"ok": True})
+
+
+@app.get("/api/admin/promo-uses")
+def admin_promo_uses():
+    """Admin only: who claimed a promo code."""
+    user = api_admin()
+    if not user:
+        return json_error("Admin access denied", 403)
+    code = re.sub(r"\s+", "", str(request.args.get("code") or "")).upper()[:40]
+    with closing(db()) as con:
+        rows = con.execute("SELECT user_id, created_at FROM promo_uses WHERE code=? ORDER BY created_at DESC LIMIT 500",
+                           (code,)).fetchall()
+    return jsonify({"count": len(rows),
+                    "users": [{"user_id": int(r["user_id"]), "name": display_name(r["user_id"]), "at": r["created_at"]} for r in rows]})
 
 
 @app.get("/api/admin/players")
