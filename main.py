@@ -96,7 +96,7 @@ def deposit_method(key):
             return m
     return None
 MIN_DEPOSIT = 20          # smallest deposit (ETB)
-REFERRAL_REWARD = 50      # ETB bonus (Play wallet) the inviter gets when an invited person's deposit is approved (editable in the admin panel)
+REFERRAL_REWARD = 10      # ETB bonus (Play wallet) the inviter gets when an invited NEW person shares his own phone number (editable in the admin panel)
 REFERRAL_MIN_DEPOSIT = 50  # smallest approved deposit of the invited person that pays the inviter (editable in the admin panel)
 # Secret for the phone's SMS-forwarding webhook (/api/sms-webhook). Without it the webhook is disabled.
 SMS_SECRET = os.environ.get("SMS_SECRET", "").strip()
@@ -379,6 +379,30 @@ def register_phone(user_id, phone):
         return result
 
 
+def pay_referral_on_phone(uid):
+    """The invited person shared his own phone number: pay his inviter once (REFERRAL_REWARD, Play wallet).
+    Returns the inviter id, or None when nothing was paid."""
+    uid = int(uid)
+    with closing(db()) as con:
+        con.execute("BEGIN IMMEDIATE")
+        u = con.execute("SELECT referred_by, referral_paid FROM users WHERE user_id=?", (uid,)).fetchone()
+        if not u or not u["referred_by"] or u["referral_paid"]:
+            con.rollback()
+            return None
+        inviter = int(u["referred_by"])
+        reward = float(setting_con(con, "referral_reward"))
+        if reward <= 0 or inviter == uid or con.execute("SELECT 1 FROM users WHERE user_id=?", (inviter,)).fetchone() is None:
+            con.rollback()
+            return None
+        con.execute("UPDATE users SET credits=credits+? WHERE user_id=?", (reward, inviter))
+        con.execute("UPDATE users SET referral_paid=? WHERE user_id=?", (reward, uid))
+        con.commit()
+    send_to_chat(inviter, L(inviter,
+                            "🎉 የጋበዙት ሰው ተቀላቅሎ ስልክ ቁጥሩን አጋርቷል! %s ብር ቦነስ ወደ መጫወቻ ሂሳብዎ ተጨምሯል።" % money(reward),
+                            "🎉 Someone you invited joined and shared their phone number! %s ETB bonus was added to your Play wallet." % money(reward)))
+    return inviter
+
+
 def set_language(user_id, language):
     with closing(db()) as con:
         con.execute("UPDATE users SET language=? WHERE user_id=?", (language, int(user_id)))
@@ -456,6 +480,19 @@ def fresh_game():
 
 
 game_state = fresh_game()
+
+
+def _restore_round_number():
+    """After a restart / redeploy continue with the next round number instead of starting from 1 again."""
+    try:
+        with closing(db()) as con:
+            last = con.execute("SELECT COALESCE(MAX(round_no), 0) FROM rounds").fetchone()[0]
+        game_state["round"] = int(last) + 1
+    except Exception:
+        logger.exception("could not restore the round number")
+
+
+_restore_round_number()
 
 
 def generate_75_bingo_card(card_num):
@@ -741,11 +778,9 @@ def main_keyboard(user_id):
         rows.append([KeyboardButton(t["share_phone"], request_contact=True)])
     rows += [
         [KeyboardButton(t["play"]), KeyboardButton(t["balance"])],
-        [KeyboardButton(t["deposit"]), KeyboardButton(t["withdraw"])],
-        [KeyboardButton(t["wallet"]), KeyboardButton(t["rank"])],
+        [KeyboardButton(t["deposit"]), KeyboardButton(t["rank"])],
         [KeyboardButton(t["promo"]), KeyboardButton(t["invite"])],
-        [KeyboardButton(t["rules"]), KeyboardButton(t["language"])],
-        [KeyboardButton(t["support"])],
+        [KeyboardButton(t["language"]), KeyboardButton(t["support"])],
     ]
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
@@ -937,12 +972,12 @@ async def send_invite(update, context, uid):
         return
     link = "https://t.me/%s?start=ref_%d" % (username, uid)
     n, paid, earned = referral_stats(uid)
-    reward, min_dep = money(get_setting("referral_reward")), money(get_setting("referral_min_deposit"))
+    reward = money(get_setting("referral_reward"))
     text = L(uid,
-             "\U0001f517 \u130b\u1265\u12dd \u12a5\u1293 \u12a0\u130d\u129d\n\n\u12e8\u12a5\u122d\u1235\u12ce \u1218\u130b\u1260\u12e3 \u120a\u1295\u12ad:\n%s\n\n\u1313\u12f0\u129b\u12ce \u1260\u12da\u1205 \u120a\u1295\u12ad \u1308\u1265\u1276 \u1262\u12eb\u1295\u1235 %s \u1265\u122d \u1308\u1295\u12d8\u1265 \u12a0\u1235\u1308\u1265\u1276 \u12ad\u134d\u12eb\u12cd \u1232\u1338\u12f5\u1245 "
-             "%s \u1265\u122d \u1266\u1290\u1235 \u12c8\u12f0 \u1218\u132b\u12c8\u127b \u1202\u1233\u1265\u12ce \u12ed\u1328\u1218\u122b\u120d\u1362\n\n\U0001f465 \u12e8\u130b\u1260\u12df\u1278\u12cd: %d\n\u2705 \u1308\u1295\u12d8\u1265 \u12eb\u1235\u1308\u1261: %d\n\U0001f4b0 \u12eb\u1308\u1299\u1275: %s \u1265\u122d" % (link, min_dep, reward, n, paid, money(earned)),
-             "\U0001f517 Invite & earn\n\nYour invite link:\n%s\n\nWhen a friend joins with this link and a deposit of at least %s ETB is approved, "
-             "a %s ETB bonus is added to your Play wallet.\n\n\U0001f465 Invited: %d\n\u2705 Deposited: %d\n\U0001f4b0 Earned: %s ETB" % (link, min_dep, reward, n, paid, money(earned)))
+             "🔗 ጋብዝ እና አግኝ\n\nየእርስዎ መጋበዣ ሊንክ:\n%s\n\nጓደኛዎ በዚህ ሊንክ ገብቶ ስልክ ቁጥሩን ሲያጋራ %s ብር ቦነስ ወደ መጫወቻ ሂሳብዎ ይጨመራል።\n\n"
+             "👥 የጋበዟቸው: %d\n✅ ቦነስ ያገኙበት: %d\n💰 ያገኙት: %s ብር" % (link, reward, n, paid, money(earned)),
+             "🔗 Invite & earn\n\nYour invite link:\n%s\n\nWhen a friend joins with this link and shares their phone number, "
+             "a %s ETB bonus is added to your Play wallet.\n\n👥 Invited: %d\n✅ Bonus earned from: %d\n💰 Earned: %s ETB" % (link, reward, n, paid, money(earned)))
     share = "https://t.me/share/url?url=%s&text=%s" % (quote(link), quote(L(uid, "\u1260\u123d \u1260\u123d \u1262\u1295\u130e - \u1270\u132b\u12cd\u1270\u12cd \u12eb\u1238\u1295\u1349! \U0001f3b0", "Besh Besh Bingo - play and win! \U0001f3b0")))
     await update.effective_message.reply_text(
         text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(L(uid, "\U0001f4e4 \u1208\u1313\u12f0\u129b \u12a0\u130b\u122b", "\U0001f4e4 Share"), url=share)]]))
@@ -1175,6 +1210,7 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
     loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(None, register_phone, user.id, phone)
     if result == "bonus":
+        await loop.run_in_executor(None, pay_referral_on_phone, user.id)   # new person + his own, unused number
         key = "contact_bonus"
     elif result == "dup":
         key = "contact_dup"
@@ -1707,7 +1743,7 @@ def approve_deposit(req_id, reviewer_id, via="admin", amount=None, paid_at=None)
         if inc_free:
             con.execute("UPDATE incoming_payments SET used_by_req=? WHERE id=?", (req_id, inc["id"]))
         u = con.execute("SELECT referred_by, referral_paid FROM users WHERE user_id=?", (uid,)).fetchone()
-        if u and u["referred_by"] and not u["referral_paid"]:
+        if False and u and u["referred_by"] and not u["referral_paid"]:   # v14: paid when the invited person shares his phone
             exists = con.execute("SELECT 1 FROM users WHERE user_id=?", (u["referred_by"],)).fetchone()
             reward_now = setting_con(con, "referral_reward")
             if exists and reward_now > 0 and amt >= setting_con(con, "referral_min_deposit"):
@@ -2074,7 +2110,7 @@ INDEX_HTML = r"""<!doctype html>
 <html lang="am"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="theme-color" content="#06180d"><title>&#x1260;&#x123D; &#x1260;&#x123D; &#x1262;&#x1295;&#x130E;</title><script src="https://telegram.org/js/telegram-web-app.js"></script><link rel="stylesheet" href="/static/style.css"></head>
 <body><main class="app-shell">
 <header class="topbar">
-  <div class="brand-info"><div class="eyebrow">&#x26A1; &#x1260;&#x123D; &#x1260;&#x123D; &#x1262;&#x1295;&#x130E; &#xB7; v13</div><h1 id="round-title">&#x12D9;&#x122D; #1</h1></div>
+  <div class="brand-info"><div class="eyebrow">&#x26A1; &#x1260;&#x123D; &#x1260;&#x123D; &#x1262;&#x1295;&#x130E; &#xB7; v14</div><h1 id="round-title">&#x12D9;&#x122D; #1</h1></div>
   <div class="top-scores">
     <div class="score-box"><span>PLAY</span><strong id="play-bal">0.00</strong></div>
     <div class="score-box win"><span>WIN</span><strong id="win-bal">0.00</strong></div>
@@ -2083,6 +2119,7 @@ INDEX_HTML = r"""<!doctype html>
   </div>
 </header>
 
+<div id="prize-bar" class="prize-bar">&#x1F3C6; &#x12F0;&#x1228;&#x123D;: <b id="prize-amt">0.00</b> &#x1265;&#x122D; <span id="prize-cards"></span></div>
 <div id="phase-banner" class="phase-banner"></div>
 
 <section class="game-panel" id="selection-panel">
@@ -2239,6 +2276,9 @@ STYLE_CSS = r""":root{color-scheme:dark;--bg:#041509;--panel:#0b2113;--panel2:#1
 .score-box{background:var(--panel2);border:1px solid var(--line);padding:4px 8px;border-radius:8px;font-size:11px;text-align:center}
 .score-box.win{border-color:var(--gold)}.score-box strong{display:block;color:var(--gold);font-size:13px}
 .current-call-badge{width:40px;height:40px;background:linear-gradient(135deg,#39d66f,#0b6329);border-radius:10px;display:grid;place-items:center;font-weight:900;font-size:16px;color:#041509}
+.prize-bar{background:linear-gradient(90deg,#3a2f05,#6b5508,#3a2f05);border:1px solid var(--gold);padding:8px;border-radius:10px;text-align:center;font-size:15px;margin-bottom:8px;font-weight:bold;color:#fff}
+.prize-bar b{color:var(--gold);font-size:22px;margin:0 2px}
+.prize-bar span{font-size:12px;opacity:.85}
 .phase-banner{background:#183820;border:1px solid var(--teal);padding:8px;border-radius:8px;text-align:center;font-size:12px;margin-bottom:10px;font-weight:bold;color:var(--gold)}
 .win-overlay{position:fixed;inset:0;background:rgba(0,0,0,.82);display:flex;align-items:center;justify-content:center;z-index:2000;padding:20px}
 .win-box{background:linear-gradient(160deg,#0b6329,#041509);border:3px solid var(--gold);border-radius:20px;padding:26px 20px;text-align:center;max-width:380px;width:100%;box-shadow:0 0 40px rgba(255,230,41,.45);animation:winpulse 1s ease-in-out infinite alternate}
@@ -2458,6 +2498,8 @@ function render() {
   const isSelecting = (model.phase === 'selecting');
 
   document.getElementById('round-title').textContent = '\u12D9\u122D #' + model.round;
+  document.getElementById('prize-amt').textContent = Number(model.prize_payout || 0).toFixed(2);
+  document.getElementById('prize-cards').textContent = (model.taken_cards || []).length ? '\u00B7 ' + (model.taken_cards || []).length + ' \u12AB\u122D\u12F5' : '';
   document.getElementById('play-bal').textContent = model.credits.toFixed(2);
   document.getElementById('win-bal').textContent = (model.win_credits || 0).toFixed(2);
   document.getElementById('w-play').textContent = model.credits.toFixed(2);
@@ -3138,6 +3180,7 @@ def api_miniapp_game():
             "selection_ends_at": game_state["selection_ends_at"],
             "server_time": time.time(),
             "prize": game_state["prize"],
+            "prize_payout": (int(round(float(game_state["prize"]) * 100)) * (100 - HOUSE_PERCENT) // 100) / 100.0,   # what the winner gets
             "called_numbers": list(game_state["called_numbers"]),
             "current_number": game_state["current_number"],
             "credits": row["credits"] if row else 100.0,
