@@ -54,6 +54,7 @@ except ValueError:
 NEW_USER_BONUS = 10  # welcome bonus (ETB) for a NEW user who shares his phone contact
 HOUSE_PERCENT = 15   # owner's share of every round's prize pool (winners share the other 85%)
 MIN_WITHDRAW = 100   # smallest withdrawal a player may ask for (ETB)
+MIN_WITHDRAW_DEPOSITS = 100   # v15: a player may withdraw only after ALL his approved deposits add up to this much (ETB)
 MAX_PENDING_DEPOSITS = 5  # unreviewed deposit requests one player may have at the same time
 MAX_CARDS_PER_PLAYER = 10   # most cards one player may hold in a round
 RANK_SIZE = 10      # how many players the Rank screen shows
@@ -474,7 +475,8 @@ def fresh_game():
         "card_matrices": {},          # (user_id, card_id) -> 5x5 grid (1-75)
         "marked": {},                 # (user_id, card_id) -> set of marked numbers/FREE
         "finished_ends_at": 0,        # when the 'finished' (winner shown) phase ends
-        "last_winners": [],           # [{user_id, name, card_id, prize}]
+        "last_winners": [],           # [{user_id, name, card_id, prize, matrix, marked, cells}]
+        "closing_number": None,       # the number that was called when the round closed
         "card_paid_from": {},         # (user_id, card_id) -> "credits" or "win" wallet
     }
 
@@ -529,6 +531,21 @@ def card_has_bingo(card, marked):
     return False
 
 
+def winning_cells(card, marked):
+    """v15: the cells [row, col] of every completed pattern (row, column, diagonal, four corners) on a card."""
+    marked = set(marked) | {"FREE"}
+    patterns = [[(r, c) for c in range(5)] for r in range(5)]
+    patterns += [[(r, c) for r in range(5)] for c in range(5)]
+    patterns.append([(i, i) for i in range(5)])
+    patterns.append([(i, 4 - i) for i in range(5)])
+    patterns.append([(0, 0), (0, 4), (4, 0), (4, 4)])
+    cells = set()
+    for p in patterns:
+        if all(card[r][c] in marked for r, c in p):
+            cells.update(p)
+    return [[r, c] for r, c in sorted(cells)]
+
+
 def reset_round(refund=False):
     """Start a new round. Must be called with game_lock held (it is re-entrant)."""
     with game_lock:
@@ -548,6 +565,7 @@ def reset_round(refund=False):
         game_state["card_matrices"] = {}
         game_state["marked"] = {}
         game_state["last_winners"] = []
+        game_state["closing_number"] = None
         game_state["card_paid_from"] = {}
         game_state["finished_ends_at"] = 0
 
@@ -619,7 +637,12 @@ def declare_winners(winners):
                 "INSERT INTO wins(user_id, username, round_no, card_index, prize) VALUES(?,?,?,?,?)",
                 (int(uid), name, game_state["round"], cid, share))
             con.commit()
-        results.append({"user_id": uid, "name": name, "card_id": cid, "prize": share})
+        mat = game_state["card_matrices"].get((uid, cid)) or generate_75_bingo_card(cid)
+        mk = game_state["marked"].get((uid, cid), {"FREE"})
+        results.append({"user_id": uid, "name": name, "card_id": cid, "prize": share,
+                        "matrix": mat, "marked": [x for x in mk if x != "FREE"],
+                        "cells": winning_cells(mat, mk)})
+    game_state["closing_number"] = game_state["current_number"]   # v15: the call the round closed on
     game_state["last_winners"] = results
     record_round("won", house, share * len(winners), results)
     game_state["phase"] = "finished"
@@ -896,9 +919,30 @@ async def show_deposit_methods(message, uid):
     await message.reply_text(text, reply_markup=method_keyboard(uid))
 
 
+def total_deposited(uid):
+    """Sum of all APPROVED deposits of this player (the money he really paid in; bonuses are not counted)."""
+    with closing(db()) as con:
+        return float(con.execute(
+            "SELECT COALESCE(SUM(amount),0) FROM deposit_requests WHERE user_id=? AND status='approved'",
+            (int(uid),)).fetchone()[0])
+
+
+def withdraw_deposit_problem(uid):
+    """v15: only players whose deposits add up to MIN_WITHDRAW_DEPOSITS or more may withdraw.
+    Returns the message to show, or None when the player may withdraw."""
+    if total_deposited(uid) + 1e-9 >= MIN_WITHDRAW_DEPOSITS:
+        return None
+    return L(uid, "⚠️ ለማውጣት ቢያንስ %d ብር ዲፖዚት ማድረግ አለብዎት" % MIN_WITHDRAW_DEPOSITS,
+             "⚠️ To withdraw you must have deposited at least %d ETB." % MIN_WITHDRAW_DEPOSITS)
+
+
 async def start_withdraw(message, uid, ud):
     row = get_user(uid)
     win = float(row["win_credits"]) if row else 0.0
+    problem = await asyncio.get_running_loop().run_in_executor(None, withdraw_deposit_problem, uid)
+    if problem:
+        await message.reply_text(problem)
+        return
     if win < MIN_WITHDRAW:
         await message.reply_text(L(uid,
             "📤 ገንዘብ ማውጫ (%s ብቻ)\n\nማውጣት የሚችሉት ከአሸናፊነት (Win) ሂሳብዎ ብቻ ነው።\nየ Win ሂሳብዎ: %s ብር\nዝቅተኛው የማውጫ መጠን: %d ብር" % (WITHDRAW_METHOD, money(win), MIN_WITHDRAW),
@@ -924,6 +968,9 @@ def create_withdraw(uid, amt, account_info):
     account_info = str(account_info or "").strip()[:200]
     if not amt or not account_info:
         return False, L(uid, "እባክዎ መረጃውን ይሙሉ", "Please fill in all the details.")
+    problem = withdraw_deposit_problem(uid)   # v15: total deposits must reach MIN_WITHDRAW_DEPOSITS
+    if problem:
+        return False, problem
     if amt < MIN_WITHDRAW:
         return False, L(uid, "ዝቅተኛው የማውጫ መጠን %d ብር ነው።" % MIN_WITHDRAW, "The minimum withdrawal is %d ETB." % MIN_WITHDRAW)
     if not telebirr_phone(account_info):
@@ -2110,7 +2157,7 @@ INDEX_HTML = r"""<!doctype html>
 <html lang="am"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="theme-color" content="#06180d"><title>&#x1260;&#x123D; &#x1260;&#x123D; &#x1262;&#x1295;&#x130E;</title><script src="https://telegram.org/js/telegram-web-app.js"></script><link rel="stylesheet" href="/static/style.css"></head>
 <body><main class="app-shell">
 <header class="topbar">
-  <div class="brand-info"><div class="eyebrow">&#x26A1; &#x1260;&#x123D; &#x1260;&#x123D; &#x1262;&#x1295;&#x130E; &#xB7; v14</div><h1 id="round-title">&#x12D9;&#x122D; #1</h1></div>
+  <div class="brand-info"><div class="eyebrow">&#x26A1; &#x1260;&#x123D; &#x1260;&#x123D; &#x1262;&#x1295;&#x130E; &#xB7; v15</div><h1 id="round-title">&#x12D9;&#x122D; #1</h1></div>
   <div class="top-scores">
     <div class="score-box"><span>PLAY</span><strong id="play-bal">0.00</strong></div>
     <div class="score-box win"><span>WIN</span><strong id="win-bal">0.00</strong></div>
@@ -2173,7 +2220,7 @@ INDEX_HTML = r"""<!doctype html>
     <h3>&#x1308;&#x1295;&#x12D8;&#x1265; &#x121B;&#x12CD;&#x1323;&#x1275;</h3>
     <input id="withdraw-account" placeholder="የ Telebirr ስልክ ቁጥር እና ስም (ለምሳሌ 0912345678 አበበ)">
     <input id="withdraw-amount" type="number" placeholder="&#x1218;&#x1320;&#x1295; (&#x1265;&#x122D;)">
-    <div class="hint">ገንዘብ ማውጣት በ Telebirr ብቻ ነው። ዝቅተኛው የማውጫ መጠን 100 ብር ነው። የሚወጣው ከአሸናፊነት (Win) ሂሳብ ብቻ ነው።</div>
+    <div class="hint">ገንዘብ ማውጣት በ Telebirr ብቻ ነው። ዝቅተኛው የማውጫ መጠን 100 ብር ነው። የሚወጣው ከአሸናፊነት (Win) ሂሳብ ብቻ ነው። ለማውጣት ቢያንስ 100 ብር ዲፖዚት ማድረግ አለብዎት።</div>
     <button id="send-withdraw" class="primary-btn btn-withdraw">&#x12E8;&#x121B;&#x12CD;&#x1323;&#x1275; &#x1325;&#x12EB;&#x1244; &#x120B;&#x12AD;</button>
   </div>
 </div>
@@ -2192,7 +2239,7 @@ INDEX_HTML = r"""<!doctype html>
   <button class="nav-btn" id="nav-rules" onclick="openRules()">&#x1F4DC; &#x1205;&#x130D;</button>
 </nav>
 </main>
-<div id="win-overlay" class="win-overlay" style="display:none"><div class="win-box"><div class="win-title">&#x1F389; BINGO! &#x1F389;</div><div id="win-names" class="win-line"></div><div id="win-prize" class="win-line"></div><div id="win-call" class="win-line"></div><div id="win-next" class="win-sub"></div></div></div>
+<div id="win-overlay" class="win-overlay" style="display:none"><div class="win-box"><div class="win-title">&#x1F389; BINGO! &#x1F389;</div><div id="win-names" class="win-line"></div><div id="win-prize" class="win-line"></div><div id="win-cards" class="win-cards"></div><div id="win-call" class="win-call"></div><div id="win-next" class="win-sub"></div></div></div>
 <div id="rules-overlay" class="rules-overlay" style="display:none">
   <div class="rules-sheet">
     <div class="rules-head"><button id="rules-close" class="rules-close">&#x12DD;&#x130B;</button><div class="rules-title">&#x12E8;&#x1328;&#x12CB;&#x1273;&#x12CD; &#x1218;&#x1218;&#x122A;&#x12EB; &#x12A5;&#x1293; &#x12F0;&#x1295;&#x1265;</div></div>
@@ -2286,6 +2333,17 @@ STYLE_CSS = r""":root{color-scheme:dark;--bg:#041509;--panel:#0b2113;--panel2:#1
 .win-line{font-size:18px;font-weight:800;margin:6px 0;word-break:break-word;white-space:pre-line}
 .win-sub{font-size:12px;color:var(--muted);margin-top:12px}
 @keyframes winpulse{from{transform:scale(1)}to{transform:scale(1.04)}}
+.win-cards{display:flex;flex-wrap:wrap;gap:10px;justify-content:center;margin:12px 0 4px}
+.win-card{width:100%;max-width:250px}
+.win-cards.multi .win-card{width:calc(50% - 5px);max-width:none}
+.win-card-title{font-size:11px;font-weight:800;margin-bottom:3px;color:var(--gold);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.win-card-head{display:grid;grid-template-columns:repeat(5,1fr);gap:3px;margin-bottom:3px}
+.win-card-head div{font-weight:900;font-size:13px;color:var(--gold);text-align:center}
+.win-card-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:3px}
+.wc-cell{aspect-ratio:1;display:grid;place-items:center;border-radius:6px;background:#06180d;border:1px solid var(--line);font-weight:800;font-size:clamp(11px,3.6vw,15px);color:var(--text)}
+.wc-cell.wc-mark{background:#f59e0b;color:#2a1600;border-color:#f59e0b}
+.wc-cell.wc-win{background:#22c55e;color:#04210d;border-color:#86efac;box-shadow:0 0 8px #22c55e99}
+.win-call{font-size:44px;font-weight:900;color:var(--gold);line-height:1.1;margin-top:8px}
 .phase-banner.win{background:#483308;border-color:var(--gold);font-size:13px}
 .sound-btn{background:var(--panel2);border:1px solid var(--line);border-radius:8px;width:34px;height:34px;font-size:16px;cursor:pointer;color:var(--text)}
 .game-panel,.wallet-section,.rank-section{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:12px;margin-bottom:12px}
@@ -2492,6 +2550,39 @@ function renderPayBox() {
   document.getElementById('pay-number-label').textContent = m.number_label || '';
   document.getElementById('pay-method-label').textContent = m.label;
 }
+// v15: the winner's card - winning pattern cells green, the other called (marked) numbers orange
+let winCardsKey = null;
+function renderWinCards(winners, round) {
+  const box = document.getElementById('win-cards'); if (!box) return;
+  const key = round + ':' + winners.map(x => x.card_id).join(',');
+  if (key === winCardsKey) return;
+  winCardsKey = key;
+  box.innerHTML = '';
+  box.className = 'win-cards' + (winners.length > 1 ? ' multi' : '');
+  winners.slice(0, 4).forEach(x => {
+    if (!x.matrix) return;
+    const cells = new Set((x.cells || []).map(c => c[0] + ',' + c[1]));
+    const marked = new Set(x.marked || []);
+    const wrap = document.createElement('div'); wrap.className = 'win-card';
+    if (winners.length > 1) {
+      const t = document.createElement('div'); t.className = 'win-card-title';
+      t.textContent = x.name + ' #' + x.card_id; wrap.appendChild(t);
+    }
+    const hd = document.createElement('div'); hd.className = 'win-card-head';
+    ['B', 'I', 'N', 'G', 'O'].forEach(l => { const h = document.createElement('div'); h.textContent = l; hd.appendChild(h); });
+    wrap.appendChild(hd);
+    const g = document.createElement('div'); g.className = 'win-card-grid';
+    x.matrix.forEach((row, r) => row.forEach((n, c) => {
+      const d = document.createElement('div'); d.className = 'wc-cell';
+      if (n === 'FREE') { d.textContent = '★'; d.classList.add('wc-free'); }
+      else d.textContent = n;
+      if (cells.has(r + ',' + c)) d.classList.add('wc-win');
+      else if (n !== 'FREE' && marked.has(n)) d.classList.add('wc-mark');
+      g.appendChild(d);
+    }));
+    wrap.appendChild(g); box.appendChild(wrap);
+  });
+}
 function render() {
   if (!model) return;
   const isBingo = tab === 'bingo';
@@ -2543,7 +2634,8 @@ function render() {
     if (announcedRound !== model.round) { announcedRound = model.round; announceBingo(); }
     document.getElementById('win-names').textContent = w.map(x => x.name + ' \u2014 \u12AB\u122D\u12F5 #' + x.card_id).join('\n');
     document.getElementById('win-prize').textContent = '\u123D\u120D\u121B\u1275: ' + (w[0] ? w[0].prize : 0) + ' \u1265\u122D' + (w.length > 1 ? ' (\u1208\u12A5\u12EB\u1295\u12F3\u1295\u12F3\u1278\u12CD)' : '');
-    document.getElementById('win-call').textContent = '\u1260 ' + (model.called_numbers || []).length + '\u129B \u1325\u122A \u1270\u12D8\u130B';
+    renderWinCards(w, model.round);
+    document.getElementById('win-call').textContent = (model.closing_number !== null && model.closing_number !== undefined) ? String(model.closing_number) : '';
     document.getElementById('win-next').textContent = '\u12A0\u12F2\u1235 \u12D9\u122D \u1260 ' + rem + ' \u1230\u12A8\u1295\u12F5 \u12CD\u1235\u1325 \u12ED\u1300\u121D\u122B\u120D';
   } else {
     banner.style.display = 'none';
@@ -3189,7 +3281,9 @@ def api_miniapp_game():
             "my_cards": my_cards,
             "my_cards_data": my_cards_data,
             "finished_ends_at": game_state["finished_ends_at"],
-            "winners": [{"name": w["name"], "card_id": w["card_id"], "prize": w["prize"]}
+            "closing_number": game_state.get("closing_number"),
+            "winners": [{"name": w["name"], "card_id": w["card_id"], "prize": w["prize"],
+                         "matrix": w.get("matrix"), "marked": w.get("marked", []), "cells": w.get("cells", [])}
                         for w in game_state["last_winners"]],
         })
 
