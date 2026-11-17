@@ -48,9 +48,9 @@ CARD_COST = 10
 # Free credits every account gets when it first opens the bot. Default 100 (unchanged);
 # set the STARTING_CREDITS environment variable on Render (e.g. 0) to change it.
 try:
-    STARTING_CREDITS = float(os.environ.get("STARTING_CREDITS", "100"))
+    STARTING_CREDITS = float(os.environ.get("STARTING_CREDITS", "0"))   # v16: default 0 (was 100 free ETB per new account)
 except ValueError:
-    STARTING_CREDITS = 100.0
+    STARTING_CREDITS = 0.0
 NEW_USER_BONUS = 10  # welcome bonus (ETB) for a NEW user who shares his phone contact
 HOUSE_PERCENT = 15   # owner's share of every round's prize pool (winners share the other 85%)
 MIN_WITHDRAW = 100   # smallest withdrawal a player may ask for (ETB)
@@ -384,6 +384,7 @@ def pay_referral_on_phone(uid):
     """The invited person shared his own phone number: pay his inviter once (REFERRAL_REWARD, Play wallet).
     Returns the inviter id, or None when nothing was paid."""
     uid = int(uid)
+    return None   # v16: the referral reward is paid only after the invited person's deposit (see approve_deposit)
     with closing(db()) as con:
         con.execute("BEGIN IMMEDIATE")
         u = con.execute("SELECT referred_by, referral_paid FROM users WHERE user_id=?", (uid,)).fetchone()
@@ -963,20 +964,41 @@ def telebirr_phone(text):
     return ("0" + m.group(1)) if m else None
 
 
+def phone_shared_problem(uid):
+    """v16: True when an EARLIER account already registered the same phone number (one phone = one account)."""
+    with closing(db()) as con:
+        me = con.execute("SELECT phone, created_at FROM users WHERE user_id=?", (int(uid),)).fetchone()
+        if not me or not me["phone"]:
+            return False
+        return con.execute(
+            "SELECT 1 FROM users WHERE phone=? AND user_id!=? AND (created_at<? OR (created_at=? AND user_id<?))",
+            (me["phone"], int(uid), me["created_at"], me["created_at"], int(uid))).fetchone() is not None
+
+
 def create_withdraw(uid, amt, account_info):
     """One withdrawal request from the bot chat or the Mini App (Telebirr only). Returns (ok, message)."""
     account_info = str(account_info or "").strip()[:200]
-    if not amt or not account_info:
+    if not amt:
         return False, L(uid, "እባክዎ መረጃውን ይሙሉ", "Please fill in all the details.")
     problem = withdraw_deposit_problem(uid)   # v15: total deposits must reach MIN_WITHDRAW_DEPOSITS
     if problem:
         return False, problem
     if amt < MIN_WITHDRAW:
         return False, L(uid, "ዝቅተኛው የማውጫ መጠን %d ብር ነው።" % MIN_WITHDRAW, "The minimum withdrawal is %d ETB." % MIN_WITHDRAW)
-    if not telebirr_phone(account_info):
-        return False, L(uid, "ገንዘብ ማውጣት በ Telebirr ብቻ ነው። እባክዎ ትክክለኛ የ Telebirr ስልክ ቁጥር ያስገቡ (ለምሳሌ 0912345678)።",
-                        "Withdrawals are paid with Telebirr only. Please enter a valid Telebirr phone number (e.g. 0912345678).")
-    stored = "%s: %s" % (WITHDRAW_METHOD, account_info)
+    # v16: the money goes ONLY to the phone number the player registered with (shared with the bot)
+    reg = telebirr_phone(get_phone(uid))
+    if not reg:
+        return False, L(uid, "ገንዘብ ለማውጣት መጀመሪያ በቦቱ ውስጥ «ስልክ ቁጥሬን አጋራ» ን ተጭነው ስልክዎን ያስመዝግቡ።",
+                        "To withdraw, first register your phone with the bot using the \"Share my phone number\" button.")
+    typed = telebirr_phone(account_info)
+    if typed and typed != reg:
+        return False, L(uid, "ገንዘብ የሚላከው ባስመዘገቡት ስልክ ቁጥር (%s) ብቻ ነው። ሌላ ቁጥር መጠቀም አይቻልም።" % reg,
+                        "Money is sent only to your registered phone number (%s). You cannot use another number." % reg)
+    if phone_shared_problem(uid):
+        return False, L(uid, "ይህ ስልክ ቁጥር በሌላ አካውንት ተመዝግቧል፤ ከዚህ አካውንት ማውጣት አይቻልም። እባክዎ አስተዳዳሪውን ያነጋግሩ።",
+                        "This phone number is registered on another account, so withdrawals are blocked here. Please contact the admin.")
+    name = re.sub(r"[+\d][\d\-\s]{6,}", " ", account_info).strip()[:60]
+    stored = ("%s: %s %s" % (WITHDRAW_METHOD, reg, name)).strip()
     with game_lock:  # serialize balance check + deduction
         row = get_user(uid)
         if (row["win_credits"] if row else 0.0) < amt:
@@ -1021,10 +1043,10 @@ async def send_invite(update, context, uid):
     n, paid, earned = referral_stats(uid)
     reward = money(get_setting("referral_reward"))
     text = L(uid,
-             "🔗 ጋብዝ እና አግኝ\n\nየእርስዎ መጋበዣ ሊንክ:\n%s\n\nጓደኛዎ በዚህ ሊንክ ገብቶ ስልክ ቁጥሩን ሲያጋራ %s ብር ቦነስ ወደ መጫወቻ ሂሳብዎ ይጨመራል።\n\n"
-             "👥 የጋበዟቸው: %d\n✅ ቦነስ ያገኙበት: %d\n💰 ያገኙት: %s ብር" % (link, reward, n, paid, money(earned)),
-             "🔗 Invite & earn\n\nYour invite link:\n%s\n\nWhen a friend joins with this link and shares their phone number, "
-             "a %s ETB bonus is added to your Play wallet.\n\n👥 Invited: %d\n✅ Bonus earned from: %d\n💰 Earned: %s ETB" % (link, reward, n, paid, money(earned)))
+             "🔗 ጋብዝ እና አግኝ\n\nየእርስዎ መጋበዣ ሊንክ:\n%s\n\nጓደኛዎ በዚህ ሊንክ ገብቶ ቢያንስ %s ብር ዲፖዚት ሲያደርግ %s ብር ቦነስ ወደ መጫወቻ ሂሳብዎ ይጨመራል።\n\n"
+             "👥 የጋበዟቸው: %d\n✅ ቦነስ ያገኙበት: %d\n💰 ያገኙት: %s ብር" % (link, money(get_setting("referral_min_deposit")), reward, n, paid, money(earned)),
+             "🔗 Invite & earn\n\nYour invite link:\n%s\n\nWhen a friend joins with this link and deposits at least %s ETB, "
+             "a %s ETB bonus is added to your Play wallet.\n\n👥 Invited: %d\n✅ Bonus earned from: %d\n💰 Earned: %s ETB" % (link, money(get_setting("referral_min_deposit")), reward, n, paid, money(earned)))
     share = "https://t.me/share/url?url=%s&text=%s" % (quote(link), quote(L(uid, "\u1260\u123d \u1260\u123d \u1262\u1295\u130e - \u1270\u132b\u12cd\u1270\u12cd \u12eb\u1238\u1295\u1349! \U0001f3b0", "Besh Besh Bingo - play and win! \U0001f3b0")))
     await update.effective_message.reply_text(
         text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(L(uid, "\U0001f4e4 \u1208\u1313\u12f0\u129b \u12a0\u130b\u122b", "\U0001f4e4 Share"), url=share)]]))
@@ -1074,8 +1096,9 @@ async def handle_state_text(update, ud, user, msg):
                         reply_markup=cancel_markup(uid))
             return
         ud["wd_amount"], ud["state"] = amt, "wd_account"
-        await reply(L(uid, "📱 የ %s ስልክ ቁጥርዎን እና ስምዎን ይላኩ።\n\nለምሳሌ: 0912345678 አበበ ከበደ" % WITHDRAW_METHOD,
-                      "📱 Send your %s phone number and name.\n\nExample: 0912345678 Abebe Kebede" % WITHDRAW_METHOD),
+        reg = telebirr_phone(get_phone(uid)) or "—"
+        await reply(L(uid, "📱 ገንዘቡ ባስመዘገቡት ስልክ ቁጥርዎ (%s) ላይ ብቻ ይላካል።\n\nየ %s ሂሳብዎን ስም ይላኩ።\n\nለምሳሌ: አበበ ከበደ" % (reg, WITHDRAW_METHOD),
+                      "📱 The money is sent only to your registered phone number (%s).\n\nSend the name on your %s account.\n\nExample: Abebe Kebede" % (reg, WITHDRAW_METHOD)),
                     reply_markup=cancel_markup(uid))
     elif state == "wd_account":
         ok, message = await loop.run_in_executor(None, create_withdraw, uid, ud.get("wd_amount") or 0, msg)
@@ -1278,9 +1301,11 @@ async def handle_review_button(query, data, admin_id):
     if kind == "dep" and decision in ("approve", "reject"):
         row = await loop.run_in_executor(None, review_deposit, rid, decision, admin_id)
         label = "\u2705 \u1338\u12f5\u124b\u120d" if decision == "approve" else "\u274c \u12cd\u12f5\u1245 \u1270\u12f0\u122d\u1313\u120d"
-    elif kind == "wd" and decision in ("paid", "reject"):
+    elif kind == "wd" and decision in ("paid", "reject", "delete"):
         row = await loop.run_in_executor(None, review_withdraw, rid, decision)
-        label = "\u2705 \u1270\u12a8\u134d\u120f\u120d" if decision == "paid" else "\u274c \u12cd\u12f5\u1245 \u1270\u12f0\u122d\u1313\u120d (\u1265\u1229 \u1270\u1218\u120d\u1237\u120d)"
+        label = ("\u2705 \u1270\u12a8\u134d\u120f\u120d" if decision == "paid" else
+                 ("🗑 ተሰርዟል (ያለ መልስ)" if decision == "delete" else
+                  "\u274c \u12cd\u12f5\u1245 \u1270\u12f0\u122d\u1313\u120d (\u1265\u1229 \u1270\u1218\u120d\u1237\u120d)"))
     else:
         await query.answer("Invalid request", show_alert=True)
         return
@@ -1308,7 +1333,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         await handle_announce_button(query, context, data, user_id)
         return
-    if data.startswith(("dep:", "wd:")):
+    if data.startswith(("dep:", "wd:")):   # includes wd:delete:<id> (v16)
         # buttons also work inside a group, so only real admins may press them
         if user_id not in ADMIN_IDS:
             await query.answer("\U0001f6ab Unauthorized", show_alert=True)
@@ -1790,7 +1815,7 @@ def approve_deposit(req_id, reviewer_id, via="admin", amount=None, paid_at=None)
         if inc_free:
             con.execute("UPDATE incoming_payments SET used_by_req=? WHERE id=?", (req_id, inc["id"]))
         u = con.execute("SELECT referred_by, referral_paid FROM users WHERE user_id=?", (uid,)).fetchone()
-        if False and u and u["referred_by"] and not u["referral_paid"]:   # v14: paid when the invited person shares his phone
+        if u and u["referred_by"] and not u["referral_paid"]:   # v16: paid only when the invited person deposits (>= referral_min_deposit)
             exists = con.execute("SELECT 1 FROM users WHERE user_id=?", (u["referred_by"],)).fetchone()
             reward_now = setting_con(con, "referral_reward")
             if exists and reward_now > 0 and amt >= setting_con(con, "referral_min_deposit"):
@@ -2136,7 +2161,8 @@ def announce_recipients(audience):
 
 def review_withdraw(req_id, decision):
     """Mark a pending withdrawal as paid, or reject it and refund the Win wallet. Returns the row or None."""
-    status = "paid" if decision == "paid" else "rejected"
+    # v16: "delete" = remove the request and the money WITHOUT paying and WITHOUT giving it back (fake bonus money)
+    status = "paid" if decision == "paid" else ("deleted" if decision == "delete" else "rejected")
     with closing(db()) as con:
         cur = con.execute("UPDATE withdraw_requests SET status=? WHERE id=? AND status='pending'",
                           (status, req_id))
@@ -2148,8 +2174,124 @@ def review_withdraw(req_id, decision):
             con.execute("UPDATE users SET win_credits=win_credits+? WHERE user_id=?",
                         (row["amount"], row["user_id"]))
         con.commit()
-    send_to_chat(row["user_id"], tr(row["user_id"], "wd_" + status, amount=money(row["amount"])))
+    if status != "deleted":   # a deleted request sends no message to the player
+        send_to_chat(row["user_id"], tr(row["user_id"], "wd_" + status, amount=money(row["amount"])))
     return row
+
+
+# ---------------- v16: audit + removing fake bonus money (admin only) ----------------
+def player_audit(con, uid):
+    """Everything the owner needs to judge one player: real deposits, bonuses he received, what he took out."""
+    uid = int(uid)
+    dep = float(con.execute("SELECT COALESCE(SUM(amount),0) FROM deposit_requests WHERE user_id=? AND status='approved'", (uid,)).fetchone()[0])
+    dep_bonus = float(con.execute("SELECT COALESCE(SUM(bonus),0) FROM deposit_requests WHERE user_id=? AND status='approved'", (uid,)).fetchone()[0])
+    ref_earned = float(con.execute("SELECT COALESCE(SUM(referral_paid),0) FROM users WHERE referred_by=?", (uid,)).fetchone()[0])
+    invited = int(con.execute("SELECT COUNT(*) FROM users WHERE referred_by=?", (uid,)).fetchone()[0])
+    claims = float(con.execute("SELECT COALESCE(SUM(b.amount),0) FROM claim_bonus_uses u JOIN claim_bonuses b ON b.id=u.bonus_id WHERE u.user_id=?", (uid,)).fetchone()[0])
+    promos = float(con.execute("SELECT COALESCE(SUM(p.reward),0) FROM promo_uses u JOIN promo_codes p ON p.code=u.code WHERE u.user_id=?", (uid,)).fetchone()[0])
+    paid = float(con.execute("SELECT COALESCE(SUM(amount),0) FROM withdraw_requests WHERE user_id=? AND status='paid'", (uid,)).fetchone()[0])
+    pend = float(con.execute("SELECT COALESCE(SUM(amount),0) FROM withdraw_requests WHERE user_id=? AND status='pending'", (uid,)).fetchone()[0])
+    u = con.execute("SELECT credits, win_credits, phone FROM users WHERE user_id=?", (uid,)).fetchone()
+    bonus_all = dep_bonus + ref_earned + claims + promos
+    if dep + 1e-9 < MIN_WITHDRAW_DEPOSITS:
+        flag = "\U0001f534"                      # deposited less than 100: the money came from bonus
+    elif ref_earned > dep or (invited >= 5 and ref_earned >= dep * 0.5):
+        flag = "\U0001f7e1"                      # real deposit, but most of the money looks like invite bonus
+    else:
+        flag = "\U0001f7e2"
+    return {"uid": uid, "deposit": dep, "dep_bonus": dep_bonus, "ref_earned": ref_earned, "invited": invited,
+            "claims": claims, "promos": promos, "bonus_all": bonus_all, "paid": paid, "pending": pend,
+            "play": float(u["credits"]) if u else 0.0, "win": float(u["win_credits"]) if u else 0.0,
+            "phone": (u["phone"] if u else "") or "", "flag": flag}
+
+
+def audit_pending_withdrawals():
+    """Pending withdrawal requests, each with its audit line (worst first)."""
+    out = []
+    with closing(db()) as con:
+        reqs = con.execute("SELECT * FROM withdraw_requests WHERE status='pending' ORDER BY id").fetchall()
+        for r in reqs:
+            a = player_audit(con, r["user_id"])
+            a["req_id"], a["amount"], a["account_info"] = r["id"], float(r["amount"]), r["account_info"]
+            out.append(a)
+    order = {"\U0001f534": 0, "\U0001f7e1": 1, "\U0001f7e2": 2}
+    out.sort(key=lambda a: (order[a["flag"]], -a["amount"]))
+    return out
+
+
+def audit_text(a):
+    return ("%s #%d  %s (ID %s)\n"
+            "💸 የጠየቀው: %s ብር\n"
+            "📥 ዲፖዚት: %s ብር · 🎁 ቦነስ ከዲፖዚት: %s ብር\n"
+            "🔗 ጋብዞ ያገኘው: %s ብር (%d ሰው) · ክሊም/ፕሮሞ: %s ብር\n"
+            "✅ እስካሁን የተከፈለው: %s ብር · Play: %s · Win: %s\n"
+            "📱 ስልክ: %s\n🏦 %s"
+            % (a["flag"], a["req_id"], display_name(a["uid"]), a["uid"], money(a["amount"]),
+               money(a["deposit"]), money(a["dep_bonus"]), money(a["ref_earned"]), a["invited"], money(a["claims"] + a["promos"]),
+               money(a["paid"]), money(a["play"]), money(a["win"]), a["phone"] or "-", a["account_info"]))
+
+
+def wd_audit_markup(req_id):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ ተከፍሏል", callback_data="wd:paid:%d" % req_id),
+         InlineKeyboardButton("❌ ውድቅ (ብሩን መልስ)", callback_data="wd:reject:%d" % req_id)],
+        [InlineKeyboardButton("🗑 ሰርዝ (ያለ መልስ - ገንዘቡ ይጥፋ)", callback_data="wd:delete:%d" % req_id)]])
+
+
+async def audit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/audit - admin only: every pending withdrawal with the player's deposits and bonuses, with buttons."""
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.effective_message.reply_text("\U0001f6ab Unauthorized.")
+        return
+    loop = asyncio.get_running_loop()
+    rows = await loop.run_in_executor(None, audit_pending_withdrawals)
+    if not rows:
+        await update.effective_message.reply_text("ምንም ያልተፈጸመ የማውጫ ጥያቄ የለም።")
+        return
+    tot = sum(a["amount"] for a in rows)
+    red = sum(a["amount"] for a in rows if a["flag"] == "🔴")
+    await update.effective_message.reply_text(
+        "📋 ያልተፈጸሙ የማውጫ ጥያቄዎች: %d · ጠቅላላ: %s ብር\n"
+        "🔴 ዲፖዚት ከ100 ብር በታች (ገንዘቡ ከቦነስ የመጣ): %s ብር\n"
+        "🟡 ከጋበዣ ቦነስ የተገኘ ይመስላል · 🟢 ትክክለኛ ይመስላል\n\n"
+        "ከ🔴 ጀምሮ ይታያሉ። ለእያንዳንዱ ይወስኑ:\n"
+        "✅ ተከፍሏል = ከፍለዋል | ❌ ውድቅ = ብሩ ወደ ተጫዋቹ ይመለሳል | 🗑 ሰርዝ = ብሩ ሙሉ በሙሉ ይጠፋል" % (len(rows), money(tot), money(red)))
+    for a in rows[:40]:
+        await update.effective_message.reply_text(audit_text(a), reply_markup=wd_audit_markup(a["req_id"]))
+        await asyncio.sleep(0.05)
+    if len(rows) > 40:
+        await update.effective_message.reply_text("… ተጨማሪ %d ጥያቄዎች አሉ። እነዚህን ከጨረሱ በኋላ እንደገና /audit ይጠቀሙ።" % (len(rows) - 40))
+
+
+async def wipe_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/wipe <user_id> - admin only: set both wallets of that player to 0 and delete his pending withdrawals
+    (no refund, no message to him). Use it for accounts whose money came from fake bonuses."""
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.effective_message.reply_text("\U0001f6ab Unauthorized.")
+        return
+    args = getattr(context, "args", None) or []
+    if not args or not str(args[0]).isdigit():
+        await update.effective_message.reply_text("አጠቃቀም: /wipe <user_id>")
+        return
+    uid = int(args[0])
+    with closing(db()) as con:
+        con.execute("BEGIN IMMEDIATE")
+        u = con.execute("SELECT credits, win_credits FROM users WHERE user_id=?", (uid,)).fetchone()
+        if not u:
+            con.rollback()
+            await update.effective_message.reply_text("ተጫዋች አልተገኘም።")
+            return
+        n = con.execute("UPDATE withdraw_requests SET status='deleted' WHERE user_id=? AND status='pending'", (uid,)).rowcount
+        con.execute("UPDATE users SET credits=0, win_credits=0 WHERE user_id=?", (uid,))
+        con.commit()
+    await update.effective_message.reply_text(
+        "🗑 %s (ID %d) ተሰርዟል: Play %s + Win %s ብር ጠፍቷል። የተሰረዙ የማውጫ ጥያቄዎች: %d"
+        % (display_name(uid), uid, money(u["credits"]), money(u["win_credits"]), n))
+
+
+# these two commands are defined after the main handler block above, so they are registered here
+bot_application.add_handler(CommandHandler("audit", audit_command))
+bot_application.add_handler(CommandHandler("wipe", wipe_command))
 
 
 # ------------------------------ HTML & JS Assets ---------------------------
@@ -2157,7 +2299,7 @@ INDEX_HTML = r"""<!doctype html>
 <html lang="am"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="theme-color" content="#06180d"><title>&#x1260;&#x123D; &#x1260;&#x123D; &#x1262;&#x1295;&#x130E;</title><script src="https://telegram.org/js/telegram-web-app.js"></script><link rel="stylesheet" href="/static/style.css"></head>
 <body><main class="app-shell">
 <header class="topbar">
-  <div class="brand-info"><div class="eyebrow">&#x26A1; &#x1260;&#x123D; &#x1260;&#x123D; &#x1262;&#x1295;&#x130E; &#xB7; v15</div><h1 id="round-title">&#x12D9;&#x122D; #1</h1></div>
+  <div class="brand-info"><div class="eyebrow">&#x26A1; &#x1260;&#x123D; &#x1260;&#x123D; &#x1262;&#x1295;&#x130E; &#xB7; v16</div><h1 id="round-title">&#x12D9;&#x122D; #1</h1></div>
   <div class="top-scores">
     <div class="score-box"><span>PLAY</span><strong id="play-bal">0.00</strong></div>
     <div class="score-box win"><span>WIN</span><strong id="win-bal">0.00</strong></div>
@@ -2218,9 +2360,9 @@ INDEX_HTML = r"""<!doctype html>
   </div>
   <div id="withdraw-form" class="sub-form" style="display:none;">
     <h3>&#x1308;&#x1295;&#x12D8;&#x1265; &#x121B;&#x12CD;&#x1323;&#x1275;</h3>
-    <input id="withdraw-account" placeholder="የ Telebirr ስልክ ቁጥር እና ስም (ለምሳሌ 0912345678 አበበ)">
+    <input id="withdraw-account" placeholder="የ Telebirr ሂሳብ ስም (ለምሳሌ አበበ ከበደ) — ገንዘቡ ባስመዘገቡት ስልክ ብቻ ይላካል">
     <input id="withdraw-amount" type="number" placeholder="&#x1218;&#x1320;&#x1295; (&#x1265;&#x122D;)">
-    <div class="hint">ገንዘብ ማውጣት በ Telebirr ብቻ ነው። ዝቅተኛው የማውጫ መጠን 100 ብር ነው። የሚወጣው ከአሸናፊነት (Win) ሂሳብ ብቻ ነው። ለማውጣት ቢያንስ 100 ብር ዲፖዚት ማድረግ አለብዎት።</div>
+    <div class="hint">ገንዘብ ማውጣት በ Telebirr ብቻ ነው፤ ገንዘቡ የሚላከው ባስመዘገቡት ስልክ ቁጥር ብቻ ነው። ዝቅተኛው የማውጫ መጠን 100 ብር ነው። የሚወጣው ከአሸናፊነት (Win) ሂሳብ ብቻ ነው። ለማውጣት ቢያንስ 100 ብር ዲፖዚት ማድረግ አለብዎት።</div>
     <button id="send-withdraw" class="primary-btn btn-withdraw">&#x12E8;&#x121B;&#x12CD;&#x1323;&#x1275; &#x1325;&#x12EB;&#x1244; &#x120B;&#x12AD;</button>
   </div>
 </div>
@@ -2827,7 +2969,7 @@ document.getElementById('send-withdraw').onclick = () => {
   const amount = Number(document.getElementById('withdraw-amount').value);
   const account_info = document.getElementById('withdraw-account').value.trim();
   if (amount && amount < 100) { toast('\u12DD\u1245\u1270\u129B\u12CD \u12E8\u121B\u12CD\u132B \u1218\u1320\u1295 100 \u1265\u122D \u1290\u12CD'); return; }
-  if (!amount || account_info.length < 3) { toast('\u12A5\u1263\u12AD\u12CE \u1218\u1228\u1303\u12CD\u1295 \u12ED\u1219\u1209'); return; }
+  if (!amount) { toast('\u12A5\u1263\u12AD\u12CE \u1218\u1228\u1303\u12CD\u1295 \u12ED\u1219\u1209'); return; }
   action('/api/miniapp/withdraw-request', { amount, account_info }).then(() => {
     document.getElementById('withdraw-amount').value = '';
     document.getElementById('withdraw-account').value = '';
@@ -3554,7 +3696,7 @@ def admin_review_withdraw(req_id):
         return json_error("Admin access denied", 403)
     body = request.get_json(silent=True) or {}
     decision = body.get("decision")
-    if decision not in ("paid", "reject"):
+    if decision not in ("paid", "reject", "delete"):
         return json_error("Invalid decision")
     if review_withdraw(req_id, decision) is None:
         return json_error("Invalid request")
