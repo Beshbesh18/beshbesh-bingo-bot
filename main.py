@@ -2289,7 +2289,49 @@ async def wipe_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         % (display_name(uid), uid, money(u["credits"]), money(u["win_credits"]), n))
 
 
-# these two commands are defined after the main handler block above, so they are registered here
+async def bal_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/bal <user_id>               - show the Play and Win balance of a player
+    /bal <user_id> play +50      - add 50 to his Play wallet
+    /bal <user_id> win -20       - subtract 20 from his Win wallet   (a wallet never goes below 0)"""
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.effective_message.reply_text("\U0001f6ab Unauthorized.")
+        return
+    args = getattr(context, "args", None) or []
+    help_text = ("አጠቃቀም:\n/bal <user_id>  — ሂሳቡን ለማየት\n/bal <user_id> play +50  — ወደ Play መጨመር\n"
+                 "/bal <user_id> win -20  — ከ Win መቀነስ")
+    if not args or not str(args[0]).isdigit():
+        await update.effective_message.reply_text(help_text)
+        return
+    uid = int(args[0])
+    with closing(db()) as con:
+        con.execute("BEGIN IMMEDIATE")
+        u = con.execute("SELECT credits, win_credits FROM users WHERE user_id=?", (uid,)).fetchone()
+        if not u:
+            con.rollback()
+            await update.effective_message.reply_text("ተጫዋች አልተገኘም።")
+            return
+        if len(args) == 1:
+            con.rollback()
+            await update.effective_message.reply_text("👤 %s (ID %d)\n🎮 Play: %s ብር\n🏆 Win: %s ብር" % (display_name(uid), uid, money(u["credits"]), money(u["win_credits"])))
+            return
+        col = {"play": "credits", "win": "win_credits"}.get(str(args[1]).lower())
+        try:
+            delta = float(str(args[2]).replace("+", "")) if len(args) > 2 else None
+        except ValueError:
+            delta = None
+        if not col or delta is None:
+            con.rollback()
+            await update.effective_message.reply_text(help_text)
+            return
+        new = max(0.0, float(u[col]) + delta)
+        con.execute("UPDATE users SET %s=? WHERE user_id=?" % col, (new, uid))
+        con.commit()
+    await update.effective_message.reply_text(
+        "✅ %s (ID %d) %s: %s → %s ብር" % (display_name(uid), uid, "Play" if col == "credits" else "Win", money(u[col]), money(new)))
+
+
+# these commands are defined after the main handler block above, so they are registered here
+bot_application.add_handler(CommandHandler("bal", bal_command))
 bot_application.add_handler(CommandHandler("audit", audit_command))
 bot_application.add_handler(CommandHandler("wipe", wipe_command))
 
