@@ -52,7 +52,7 @@ try:
 except ValueError:
     STARTING_CREDITS = 0.0
 NEW_USER_BONUS = 10  # welcome bonus (ETB) for a NEW user who shares his phone contact
-HOUSE_PERCENT = 15   # owner's share of every round's prize pool (winners share the other 85%)
+HOUSE_PERCENT = 20   # DEFAULT owner's share (commission) of every round's prize pool. The owner can change it any time with /commission or in the admin panel (winners share the rest)
 MIN_WITHDRAW = 100   # smallest withdrawal a player may ask for (ETB)
 MIN_WITHDRAW_DEPOSITS = 100   # v15: a player may withdraw only after ALL his approved deposits add up to this much (ETB)
 MAX_PENDING_DEPOSITS = 5  # unreviewed deposit requests one player may have at the same time
@@ -421,6 +421,7 @@ SETTING_DEFAULTS = {
     "new_user_bonus": NEW_USER_BONUS,
     "referral_reward": REFERRAL_REWARD,
     "referral_min_deposit": REFERRAL_MIN_DEPOSIT,
+    "house_percent": HOUSE_PERCENT,   # v17: the owner's commission in % (editable)
 }
 
 
@@ -446,6 +447,27 @@ def set_setting(key, value):
 
 def new_user_bonus_text():
     return ("%.2f" % get_setting("new_user_bonus")).rstrip("0").rstrip(".")
+
+
+def house_percent():
+    """v17: the owner's commission in percent. Default HOUSE_PERCENT (20); the owner changes it with the
+    /commission command or in the admin panel (it is saved in the database, so a redeploy keeps it)."""
+    try:
+        v = get_setting("house_percent")
+    except Exception:
+        v = float(HOUSE_PERCENT)
+    return min(90.0, max(0.0, v))
+
+
+def round_house_percent():
+    """The commission locked in for the round that is running now (a change applies from the NEXT round)."""
+    p = game_state.get("house_percent")
+    return float(p) if p is not None else house_percent()
+
+
+def winners_cents(pool_cents, pct):
+    """What the winners share (in cents) when the owner keeps pct percent of the pool."""
+    return int(pool_cents * (100.0 - float(pct)) / 100.0 + 1e-9)
 
 
 def card_ranking():
@@ -479,6 +501,7 @@ def fresh_game():
         "last_winners": [],           # [{user_id, name, card_id, prize, matrix, marked, cells}]
         "closing_number": None,       # the number that was called when the round closed
         "card_paid_from": {},         # (user_id, card_id) -> "credits" or "win" wallet
+        "house_percent": house_percent(),   # v17: commission locked in when the round starts
     }
 
 
@@ -568,6 +591,7 @@ def reset_round(refund=False):
         game_state["last_winners"] = []
         game_state["closing_number"] = None
         game_state["card_paid_from"] = {}
+        game_state["house_percent"] = house_percent()   # v17: a changed commission applies from this new round
         game_state["finished_ends_at"] = 0
 
 
@@ -625,7 +649,7 @@ def declare_winners(winners):
     # the owner keeps HOUSE_PERCENT of the pool; the rest is split between the winners
     # (integer cents, so no money is created or lost: left-over cents stay with the owner)
     pool_cents = int(round(float(game_state["prize"]) * 100))
-    payout_cents = pool_cents * (100 - HOUSE_PERCENT) // 100
+    payout_cents = winners_cents(pool_cents, round_house_percent())   # v17: commission is editable (default 20%)
     share_cents = payout_cents // len(winners)
     share = share_cents / 100.0
     house = (pool_cents - share_cents * len(winners)) / 100.0
@@ -985,18 +1009,17 @@ def create_withdraw(uid, amt, account_info):
         return False, problem
     if amt < MIN_WITHDRAW:
         return False, L(uid, "ዝቅተኛው የማውጫ መጠን %d ብር ነው።" % MIN_WITHDRAW, "The minimum withdrawal is %d ETB." % MIN_WITHDRAW)
-    # v16: the money goes ONLY to the phone number the player registered with (shared with the bot)
-    reg = telebirr_phone(get_phone(uid))
+    # v17: the money may go to ANY Telebirr phone number the player types (many real players could not receive
+    # on the number they registered with, e.g. a Safaricom SIM). If he types no number, his registered one is used.
+    reg = telebirr_phone(account_info)
     if not reg:
-        return False, L(uid, "ገንዘብ ለማውጣት መጀመሪያ በቦቱ ውስጥ «ስልክ ቁጥሬን አጋራ» ን ተጭነው ስልክዎን ያስመዝግቡ።",
-                        "To withdraw, first register your phone with the bot using the \"Share my phone number\" button.")
-    typed = telebirr_phone(account_info)
-    if typed and typed != reg:
-        return False, L(uid, "ገንዘብ የሚላከው ባስመዘገቡት ስልክ ቁጥር (%s) ብቻ ነው። ሌላ ቁጥር መጠቀም አይቻልም።" % reg,
-                        "Money is sent only to your registered phone number (%s). You cannot use another number." % reg)
-    if phone_shared_problem(uid):
-        return False, L(uid, "ይህ ስልክ ቁጥር በሌላ አካውንት ተመዝግቧል፤ ከዚህ አካውንት ማውጣት አይቻልም። እባክዎ አስተዳዳሪውን ያነጋግሩ።",
-                        "This phone number is registered on another account, so withdrawals are blocked here. Please contact the admin.")
+        if re.search(r"\d{7,}", re.sub(r"[\s\-]", "", account_info)):
+            return False, L(uid, "የስልክ ቁጥሩ ትክክል አይመስልም። እባክዎ የ Telebirr ስልክ ቁጥር ያስገቡ (ለምሳሌ 0912345678)።",
+                            "The phone number does not look right. Please enter a Telebirr phone number (e.g. 0912345678).")
+        reg = telebirr_phone(get_phone(uid))
+    if not reg:
+        return False, L(uid, "እባክዎ ገንዘቡ የሚላክበትን የ Telebirr ስልክ ቁጥር ያስገቡ (ለምሳሌ 0912345678)።",
+                        "Please enter the Telebirr phone number the money should be sent to (e.g. 0912345678).")
     name = re.sub(r"[+\d][\d\-\s]{6,}", " ", account_info).strip()[:60]
     stored = ("%s: %s %s" % (WITHDRAW_METHOD, reg, name)).strip()
     with game_lock:  # serialize balance check + deduction
@@ -1096,9 +1119,8 @@ async def handle_state_text(update, ud, user, msg):
                         reply_markup=cancel_markup(uid))
             return
         ud["wd_amount"], ud["state"] = amt, "wd_account"
-        reg = telebirr_phone(get_phone(uid)) or "—"
-        await reply(L(uid, "📱 ገንዘቡ ባስመዘገቡት ስልክ ቁጥርዎ (%s) ላይ ብቻ ይላካል።\n\nየ %s ሂሳብዎን ስም ይላኩ።\n\nለምሳሌ: አበበ ከበደ" % (reg, WITHDRAW_METHOD),
-                      "📱 The money is sent only to your registered phone number (%s).\n\nSend the name on your %s account.\n\nExample: Abebe Kebede" % (reg, WITHDRAW_METHOD)),
+        await reply(L(uid, "📱 ገንዘቡ እንዲላክበት የሚፈልጉትን የ %s ስልክ ቁጥር እና ስም ይላኩ።\n\nለምሳሌ: 0912345678 አበበ ከበደ" % WITHDRAW_METHOD,
+                      "📱 Send the %s phone number the money should be sent to, and the name.\n\nExample: 0912345678 Abebe Kebede" % WITHDRAW_METHOD),
                     reply_markup=cancel_markup(uid))
     elif state == "wd_account":
         ok, message = await loop.run_in_executor(None, create_withdraw, uid, ud.get("wd_amount") or 0, msg)
@@ -2330,10 +2352,42 @@ async def bal_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "✅ %s (ID %d) %s: %s → %s ብር" % (display_name(uid), uid, "Play" if col == "credits" else "Win", money(u[col]), money(new)))
 
 
+async def commission_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/commission        - show the owner's commission
+    /commission 20     - set it to 20 % (the winners share the rest). Applies from the NEXT round."""
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.effective_message.reply_text("\U0001f6ab Unauthorized.")
+        return
+    args = getattr(context, "args", None) or []
+    loop = asyncio.get_running_loop()
+    cur = await loop.run_in_executor(None, house_percent)
+    running = round_house_percent()
+    help_text = ("💼 የአሁኑ ተቆራጭ: %s%% (አሸናፊው %s%% ያገኛል)\n"
+                 "▶️ አሁን እየሄደ ባለው ዙር: %s%%\n\n"
+                 "ለመቀየር: /commission 20\n(ከ0 እስከ 90 በመቶ፤ ለውጡ ከሚቀጥለው ዙር ጀምሮ ይሠራል)"
+                 % (money(cur), money(100 - cur), money(running)))
+    if not args:
+        await update.effective_message.reply_text(help_text)
+        return
+    try:
+        v = float(str(args[0]).replace("%", "").replace(",", "."))
+    except ValueError:
+        await update.effective_message.reply_text(help_text)
+        return
+    if not (0 <= v <= 90):
+        await update.effective_message.reply_text("⚠️ ተቆራጩ ከ0 እስከ 90 በመቶ መሆን አለበት።\n\n" + help_text)
+        return
+    await loop.run_in_executor(None, set_setting, "house_percent", v)
+    await update.effective_message.reply_text(
+        "✅ ተቆራጭ ወደ %s%% ተቀይሯል።\nአሸናፊው %s%% ያገኛል።\nከሚቀጥለው ዙር ጀምሮ ይሠራል (አሁን እየሄደ ያለው ዙር በ%s%% ይጨርሳል)።"
+        % (money(v), money(100 - v), money(running)))
+
+
 # these commands are defined after the main handler block above, so they are registered here
 bot_application.add_handler(CommandHandler("bal", bal_command))
 bot_application.add_handler(CommandHandler("audit", audit_command))
 bot_application.add_handler(CommandHandler("wipe", wipe_command))
+bot_application.add_handler(CommandHandler("commission", commission_command))
 
 
 # ------------------------------ HTML & JS Assets ---------------------------
@@ -2341,7 +2395,7 @@ INDEX_HTML = r"""<!doctype html>
 <html lang="am"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="theme-color" content="#06180d"><title>&#x1260;&#x123D; &#x1260;&#x123D; &#x1262;&#x1295;&#x130E;</title><script src="https://telegram.org/js/telegram-web-app.js"></script><link rel="stylesheet" href="/static/style.css"></head>
 <body><main class="app-shell">
 <header class="topbar">
-  <div class="brand-info"><div class="eyebrow">&#x26A1; &#x1260;&#x123D; &#x1260;&#x123D; &#x1262;&#x1295;&#x130E; &#xB7; v16</div><h1 id="round-title">&#x12D9;&#x122D; #1</h1></div>
+  <div class="brand-info"><div class="eyebrow">&#x26A1; &#x1260;&#x123D; &#x1260;&#x123D; &#x1262;&#x1295;&#x130E; &#xB7; v17</div><h1 id="round-title">&#x12D9;&#x122D; #1</h1></div>
   <div class="top-scores">
     <div class="score-box"><span>PLAY</span><strong id="play-bal">0.00</strong></div>
     <div class="score-box win"><span>WIN</span><strong id="win-bal">0.00</strong></div>
@@ -2402,9 +2456,9 @@ INDEX_HTML = r"""<!doctype html>
   </div>
   <div id="withdraw-form" class="sub-form" style="display:none;">
     <h3>&#x1308;&#x1295;&#x12D8;&#x1265; &#x121B;&#x12CD;&#x1323;&#x1275;</h3>
-    <input id="withdraw-account" placeholder="የ Telebirr ሂሳብ ስም (ለምሳሌ አበበ ከበደ) — ገንዘቡ ባስመዘገቡት ስልክ ብቻ ይላካል">
+    <input id="withdraw-account" placeholder="የ Telebirr ስልክ ቁጥር እና ስም (ለምሳሌ 0912345678 አበበ ከበደ)">
     <input id="withdraw-amount" type="number" placeholder="&#x1218;&#x1320;&#x1295; (&#x1265;&#x122D;)">
-    <div class="hint">ገንዘብ ማውጣት በ Telebirr ብቻ ነው፤ ገንዘቡ የሚላከው ባስመዘገቡት ስልክ ቁጥር ብቻ ነው። ዝቅተኛው የማውጫ መጠን 100 ብር ነው። የሚወጣው ከአሸናፊነት (Win) ሂሳብ ብቻ ነው። ለማውጣት ቢያንስ 100 ብር ዲፖዚት ማድረግ አለብዎት።</div>
+    <div class="hint">ገንዘብ ማውጣት በ Telebirr ብቻ ነው፤ ገንዘቡ የሚላከው እርስዎ በሚያስገቡት ስልክ ቁጥር ነው — ስልክ ቁጥሩን በትክክል ያስገቡ። ዝቅተኛው የማውጫ መጠን 100 ብር ነው። የሚወጣው ከአሸናፊነት (Win) ሂሳብ ብቻ ነው። ለማውጣት ቢያንስ 100 ብር ዲፖዚት ማድረግ አለብዎት።</div>
     <button id="send-withdraw" class="primary-btn btn-withdraw">&#x12E8;&#x121B;&#x12CD;&#x1323;&#x1275; &#x1325;&#x12EB;&#x1244; &#x120B;&#x12AD;</button>
   </div>
 </div>
@@ -2483,6 +2537,7 @@ ADMIN_HTML = r"""<!doctype html><html lang="am"><head><meta charset="utf-8"><met
 <h2>&#x2699;&#xFE0F; &#x12E8;&#x1266;&#x1290;&#x1235; &#x1245;&#x1295;&#x1265;&#x122D;</h2>
 <div class="rule-card"><div class="grid2"><div>&#x12A0;&#x12F2;&#x1235; &#x1270;&#x1320;&#x1243;&#x121A; &#x1266;&#x1290;&#x1235; (&#x1265;&#x122D;)<input type="number" id="st-nub"></div><div>&#x1218;&#x130B;&#x1260;&#x12E3; &#x1266;&#x1290;&#x1235; (&#x1265;&#x122D;)<input type="number" id="st-rr"></div></div>
 <div>&#x1218;&#x130B;&#x1260;&#x12E3; &#x1266;&#x1290;&#x1235; &#x12E8;&#x121A;&#x12A8;&#x1348;&#x1208;&#x12CD;&#x1363; &#x12E8;&#x1270;&#x130B;&#x1260;&#x12D8;&#x12CD; &#x1230;&#x12CD; &#x1262;&#x12EB;&#x1295;&#x1235; &#x12E8;&#x121A;&#x12EB;&#x1235;&#x1308;&#x1263;&#x12CD; &#x1265;&#x122D;<input type="number" id="st-rmd"></div>
+<div>ተቆራጭ — የባለቤት ድርሻ በመቶ (%) ከእያንዳንዱ ዙር ገንዘብ (ለውጡ ከሚቀጥለው ዙር ጀምሮ ይሠራል)<input type="number" id="st-hp" step="0.5" min="0" max="90"></div>
 <button id="st-save" class="primary-btn">&#x1F4BE; &#x12A0;&#x1235;&#x1240;&#x121D;&#x1325;</button></div>
 <h2>&#x1F381; &#x12E8;&#x12AD;&#x120A;&#x121D; &#x1266;&#x1290;&#x1236;&#x127D; (&#x1208;&#x1218;&#x1300;&#x1218;&#x122A;&#x12EB;&#x12CE;&#x1279; N &#x1230;&#x12CE;&#x127D;)</h2>
 <div class="rule-card"><div class="grid2"><input type="text" id="cb-name" placeholder="&#x1235;&#x121D; (&#x1208;&#x121D;&#x1233;&#x120C; &#x12E8;&#x12DB;&#x122C; &#x1266;&#x1290;&#x1235;)"><input type="number" id="cb-amount" placeholder="&#x1266;&#x1290;&#x1235; (&#x1265;&#x122D;)"></div>
@@ -3071,7 +3126,7 @@ function statCard(title, o) {
   return `<div class="req"><b>${title}</b>` +
     `<p>\u12D9\u122E\u127D: ${Number(o.rounds)}` + (o.players !== undefined ? ` \u00B7 \u12E8\u1270\u132B\u12C8\u1271 \u1230\u12CE\u127D: ${Number(o.players)}` : '') + `</p>` +
     `<p>\u12E8\u12AB\u122D\u12F5 \u123D\u12EB\u132D: ${birr(o.sales)} \u1265\u122D</p>` +
-    `<p>\u12F5\u122D\u123B\u12EC (15%): <b>${birr(o.house)} \u1265\u122D</b></p>` +
+    `<p>\u12F5\u122D\u123B\u12EC: <b>${birr(o.house)} \u1265\u122D</b></p>` +
     `<p>\u1208\u12A0\u1238\u1293\u134A\u12CE\u127D \u12E8\u1270\u12A8\u1348\u1208: ${birr(o.payout)} \u1265\u122D</p>` +
     `<p>\u12E8\u1308\u1263 \u12F2\u1356\u12DA\u1275 (\u12E8\u1338\u12F0\u1240): ${birr(o.deposits)} \u1265\u122D</p>` +
     (o.withdrawals !== undefined ? `<p>\u12E8\u12C8\u1323 (\u12E8\u1270\u12A8\u1348\u1208): ${birr(o.withdrawals)} \u1265\u122D</p>` : '') + `</div>`;
@@ -3339,11 +3394,15 @@ function renderSettings(s) {
   document.getElementById('st-nub').value = s.new_user_bonus;
   document.getElementById('st-rr').value = s.referral_reward;
   document.getElementById('st-rmd').value = s.referral_min_deposit;
+  document.getElementById('st-hp').value = s.house_percent;
 }
 document.getElementById('st-save').onclick = async () => {
-  const ok = await postJson('/api/admin/setting', {new_user_bonus: Number(document.getElementById('st-nub').value || 0),
+  const body = {new_user_bonus: Number(document.getElementById('st-nub').value || 0),
     referral_reward: Number(document.getElementById('st-rr').value || 0),
-    referral_min_deposit: Number(document.getElementById('st-rmd').value || 0)});
+    referral_min_deposit: Number(document.getElementById('st-rmd').value || 0)};
+  const hp = document.getElementById('st-hp').value;
+  if (hp !== '') body.house_percent = Number(hp);
+  const ok = await postJson('/api/admin/setting', body);
   if (ok) { alert('\u1270\u1240\u121D\u1327\u120D \u2705'); loadSettings(); }
 };
 
@@ -3456,7 +3515,7 @@ def api_miniapp_game():
             "selection_ends_at": game_state["selection_ends_at"],
             "server_time": time.time(),
             "prize": game_state["prize"],
-            "prize_payout": (int(round(float(game_state["prize"]) * 100)) * (100 - HOUSE_PERCENT) // 100) / 100.0,   # what the winner gets
+            "prize_payout": winners_cents(int(round(float(game_state["prize"]) * 100)), round_house_percent()) / 100.0,   # what the winner gets
             "called_numbers": list(game_state["called_numbers"]),
             "current_number": game_state["current_number"],
             "credits": row["credits"] if row else 100.0,
@@ -3965,6 +4024,8 @@ def admin_setting():
                 v = float(b[key])
             except (TypeError, ValueError):
                 return json_error("\u1275\u12ad\u12ad\u120d \u12eb\u120d\u1206\u1290 \u1218\u1228\u1303")
+            if key == "house_percent" and not (0 <= v <= 90):
+                return json_error("ተቆራጩ ከ0 እስከ 90 በመቶ መሆን አለበት")
             if not (0 <= v <= 100000):
                 return json_error("\u1218\u1320\u1291 \u12a80 \u12a5\u1235\u12a8 100000 \u1218\u1206\u1295 \u12a0\u1208\u1260\u1275")
             clean[key] = v
