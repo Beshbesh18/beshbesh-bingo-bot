@@ -1984,6 +1984,22 @@ def review_deposit(req_id, decision, admin_id):
 
 
 # ---------------- promo codes ----------------
+def eth_day_start_utc():
+    """v18: the start of the current Ethiopian day = 12:00 ጥዋት on the Ethiopian clock = 06:00 standard (Ethiopia
+    time, UTC+3) = 03:00 UTC. Returns it as a database time string (UTC)."""
+    now = utc_now()
+    start = (now - timedelta(hours=3)).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(hours=3)
+    return fmt_db(start)
+
+
+def deposits_today(con, uid):
+    """v18: sum of the player's APPROVED deposits made today, counted from 12 ሰዓት ጥዋት (Ethiopian clock)."""
+    return float(con.execute(
+        "SELECT COALESCE(SUM(amount),0) FROM deposit_requests "
+        "WHERE user_id=? AND status='approved' AND COALESCE(reviewed_at, created_at) >= ?",
+        (uid, eth_day_start_utc())).fetchone()[0])
+
+
 def redeem_promo(uid, code):
     """Returns (result, reward, extra): ok | invalid | expired | used_up | already | need_deposit."""
     code = re.sub(r"\s+", "", str(code or "")).upper()[:40]
@@ -2006,9 +2022,7 @@ def redeem_promo(uid, code):
             return "already", 0, None
         need = float(p["min_deposit"] or 0)
         if need > 0:
-            have = float(con.execute(
-                "SELECT COALESCE(SUM(amount),0) FROM deposit_requests WHERE user_id=? AND status='approved'",
-                (uid,)).fetchone()[0])
+            have = deposits_today(con, uid)   # v18: only deposits made today count (not yesterday's)
             if have + 1e-9 < need:
                 con.rollback()
                 return "need_deposit", 0, {"min": need, "have": have}
@@ -2025,8 +2039,8 @@ def promo_message(uid, result, reward, extra=None):
                  "🎉 Done! %s ETB was added to your Play wallet." % money(reward))
     if result == "need_deposit":
         extra = extra or {}
-        return L(uid, "🔒 ይህ ኮድ ባጠቃላይ %s ብር እና ከዚያ በላይ ገንዘብ ላስገቡ ተጫዋቾች ብቻ ነው።\nእስካሁን ያስገቡት: %s ብር።" % (money(extra.get("min", 0)), money(extra.get("have", 0))),
-                 "🔒 This code is only for players whose deposits total %s ETB or more.\nYou have deposited so far: %s ETB." % (money(extra.get("min", 0)), money(extra.get("have", 0))))
+        return L(uid, "🔒 ይህ ኮድ ዛሬ ባጠቃላይ %s ብር እና ከዚያ በላይ ገንዘብ ላስገቡ ተጫዋቾች ብቻ ነው።\nዛሬ ያስገቡት: %s ብር።" % (money(extra.get("min", 0)), money(extra.get("have", 0))),
+                 "🔒 This code is only for players who deposited %s ETB or more TODAY.\nYou have deposited today: %s ETB." % (money(extra.get("min", 0)), money(extra.get("have", 0))))
     return {
         "expired": L(uid, "⌛ ይህ ኮድ ጊዜው አልፏል።", "⌛ This code has expired."),
         "used_up": L(uid, "😔 ይህ ኮድ ሙሉ በሙሉ ጥቅም ላይ ውሏል።", "😔 This code has been fully used."),
@@ -2039,7 +2053,7 @@ def promo_announcement(p):
     lines = ["🎁 የፕሮሞ ኮድ!", "", "🔑 ኮድ: %s" % p["code"], "💰 ሽልማት: %s ብር" % money(p["reward"])]
     need = float(p.get("min_deposit") or 0)
     if need > 0:
-        lines.append("✅ ለማን: ባጠቃላይ %s ብር እና ከዚያ በላይ ገንዘብ ላስገቡ ተጫዋቾች ብቻ" % money(need))
+        lines.append("✅ ለማን: ዛሬ ባጠቃላይ %s ብር እና ከዚያ በላይ ገንዘብ ላስገቡ ተጫዋቾች ብቻ" % money(need))
     else:
         lines.append("✅ ለማን: ለሁሉም ተጫዋች")
     if p.get("max_uses"):
@@ -3326,7 +3340,7 @@ function renderPromos(list) {
   document.getElementById('promo-list').innerHTML = list.map((p, i) =>
     `<div class="req"><b>${esc(p.code)}</b> · ${birr(p.reward)} ብር ${p.active ? '✅' : '⏸'}` +
     `<p>የተጠቀሙ: ${Number(p.uses)}${p.max_uses ? ' / ' + Number(p.max_uses) : ' (ያልተወሰነ)'}` +
-    (Number(p.min_deposit) > 0 ? ` · 🔒 ባጠቃላይ ${birr(p.min_deposit)} ብር+ ላስገቡ ብቻ` : ' · ለሁሉም') +
+    (Number(p.min_deposit) > 0 ? ` · 🔒 ዛሬ ባጠቃላይ ${birr(p.min_deposit)} ብር+ ላስገቡ ብቻ` : ' · ለሁሉም') +
     (p.expires_at ? ` · እስከ: ${esc(fmtTime(p.expires_at))}` : '') + `</p>` +
     `<button onclick="promoAct(${i},'toggle')" style="${BTN}background:#ffe629">${p.active ? 'አቁም' : 'አስጀምር'}</button>` +
     `<button onclick="showPromoUsers(${i})" style="${BTN}background:#102d19;color:#f4f7f4;border:1px solid #20552d">👥 ማን ወሰደ</button>` +
