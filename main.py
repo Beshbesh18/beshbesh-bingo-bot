@@ -64,22 +64,18 @@ CALL_INTERVAL_SECONDS = 3
 MAX_NUMBERS_POOL = 75  # 1 to 75 numbers called in game
 TOTAL_CARDS = 600
 # ---- deposits (Telebirr only) ----
-PAY_NUMBER = os.environ.get("PAY_NUMBER", "0928564065").strip()   # the owner's Telebirr number
-PAY_NAME = os.environ.get("PAY_NAME", "Eineyew").strip()         # the name shown to players
+PAY_NUMBER = os.environ.get("PAY_NUMBER", "0954302323").strip()   # the owner's Telebirr number
+PAY_NAME = os.environ.get("PAY_NAME", "Enyew").strip()         # the name shown to players
 PAY_TAIL = re.sub(r"\D", "", PAY_NUMBER)[-4:]
 
-# ---- deposit methods: Telebirr, Abyssinia Bank, Ebirr (v13) ----
+# ---- deposit methods: Telebirr and Ebirr (v18: Bank of Abyssinia removed) ----
 # A method is shown to players ONLY when its number is filled in. Set the numbers in Render > Environment
-# (ABYSSINIA_NUMBER, EBIRR_NUMBER ...) or type them between the quotes below.
-ABYSSINIA_NUMBER = os.environ.get("ABYSSINIA_NUMBER", "82003298").strip()   # Bank of Abyssinia account number
-ABYSSINIA_NAME = os.environ.get("ABYSSINIA_NAME", "Enyew").strip()
-EBIRR_NUMBER = os.environ.get("EBIRR_NUMBER", "0928564065").strip()           # Ebirr (Kaafi) number
+# (PAY_NUMBER, EBIRR_NUMBER ...) or type them between the quotes below.
+EBIRR_NUMBER = os.environ.get("EBIRR_NUMBER", "0954302323").strip()           # Ebirr (Kaafi) number
 EBIRR_NAME = os.environ.get("EBIRR_NAME", "Enyew").strip()
 DEPOSIT_METHODS = [
     {"key": "telebirr", "label": "Telebirr", "icon": "📱", "number": PAY_NUMBER, "name": PAY_NAME,
      "num_am": "ስልክ ቁጥር", "num_en": "Phone number"},
-    {"key": "abyssinia", "label": "Abyssinia Bank", "icon": "🏦", "number": ABYSSINIA_NUMBER, "name": ABYSSINIA_NAME,
-     "num_am": "የሒሳብ ቁጥር", "num_en": "Account number"},
     {"key": "ebirr", "label": "Ebirr", "icon": "💵", "number": EBIRR_NUMBER, "name": EBIRR_NAME,
      "num_am": "ቁጥር", "num_en": "Number"},
 ]
@@ -422,6 +418,8 @@ SETTING_DEFAULTS = {
     "referral_reward": REFERRAL_REWARD,
     "referral_min_deposit": REFERRAL_MIN_DEPOSIT,
     "house_percent": HOUSE_PERCENT,   # v17: the owner's commission in % (editable)
+    "bonus_override_percent": -1,     # v18: -1 = use the time table; 0 or more = the owner's hand-set deposit bonus % for everyone
+    "bonus_override_cap": 0,          # v18: most ETB of that hand-set bonus per deposit (0 = no limit)
 }
 
 
@@ -1570,6 +1568,13 @@ def matching_rules(con, when_utc):
 
 def bonus_for(con, amount, when_utc):
     """(bonus, percent): only the HIGHEST applicable percentage is used; the cap of that rule limits the bonus."""
+    ov = setting_con(con, "bonus_override_percent")
+    if ov >= 0:   # v18: the owner set the bonus by hand (/bonus); it beats the time table until /bonus auto
+        cap = setting_con(con, "bonus_override_cap")
+        b = float(amount) * ov / 100.0
+        if cap > 0:
+            b = min(b, cap)
+        return round(b + 1e-9, 2), ov
     best_b, best_p = 0.0, 0.0
     for r in matching_rules(con, when_utc):
         b = float(amount) * r["percent"] / 100.0
@@ -1584,6 +1589,9 @@ def bonus_for(con, amount, when_utc):
 def current_bonus():
     """(percent, cap) of the best rule right now (for banners)."""
     with closing(db()) as con:
+        ov = setting_con(con, "bonus_override_percent")
+        if ov >= 0:   # v18: hand-set bonus (see /bonus)
+            return (ov, setting_con(con, "bonus_override_cap"))
         best = (0.0, 0.0)
         for r in matching_rules(con, utc_now()):
             if r["percent"] > best[0]:
@@ -1988,7 +1996,9 @@ def eth_day_start_utc():
     """v18: the start of the current Ethiopian day = 12:00 ጥዋት on the Ethiopian clock = 06:00 standard (Ethiopia
     time, UTC+3) = 03:00 UTC. Returns it as a database time string (UTC)."""
     now = utc_now()
-    start = (now - timedelta(hours=3)).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(hours=3)
+    start = now.replace(hour=3, minute=0, second=0, microsecond=0)
+    if now < start:
+        start -= timedelta(days=1)
     return fmt_db(start)
 
 
@@ -2397,11 +2407,114 @@ async def commission_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         % (money(v), money(100 - v), money(running)))
 
 
+DAY_NAMES = ["ሰኞ", "ማክሰኞ", "ረቡዕ", "ሐሙስ", "ዓርብ", "ቅዳሜ", "እሑድ"]
+
+
+def bonus_status_text():
+    """v18: the deposit bonus as it is right now (hand-set value or the time table) + the table of rules."""
+    with closing(db()) as con:
+        ov = setting_con(con, "bonus_override_percent")
+        ov_cap = setting_con(con, "bonus_override_cap")
+        rules = con.execute("SELECT * FROM bonus_rules ORDER BY id").fetchall()
+    lines = ["🎁 የዲፖዚት ቦነስ", ""]
+    if ov >= 0:
+        lines.append("✋ በእጅ የተቀመጠ (ከሰዓት ሠንጠረዥ ይበልጣል): %s%%%s" % (
+            money(ov), (" (እስከ %s ብር)" % money(ov_cap)) if ov_cap > 0 else ""))
+    else:
+        pct, cap = current_bonus()
+        lines.append("🕒 በሰዓት ሠንጠረዥ እየሠራ ነው። አሁን: %s%%%s" % (
+            money(pct), (" (እስከ %s ብር)" % money(cap)) if cap else ""))
+    lines += ["", "📋 የሰዓት ሠንጠረዥ:"]
+    for r in rules:
+        days = [int(x) for x in (r["days"] or "").split(",") if x.strip().isdigit()]
+        dtxt = ", ".join(DAY_NAMES[d] for d in days if 0 <= d <= 6) if days else "ሁሉም ቀን"
+        lines.append("%s #%d %s · %s · %s → %s · %s%%%s" % (
+            "✅" if r["active"] else "⏸", r["id"], r["name"] or "-", dtxt,
+            eth_clock(r["start_min"]), eth_clock(int(r["end_min"]) % 1440),
+            money(r["percent"]), (" (እስከ %s ብር)" % money(r["cap"])) if r["cap"] else ""))
+    lines += ["",
+              "ለመቀየር:",
+              "/bonus 50 — አሁኑኑ ለሁሉም ዲፖዚት 50% (በእጅ)",
+              "/bonus 50 200 — 50%፣ ከፍተኛው 200 ብር",
+              "/bonus off — ቦነስ የለም (0%)",
+              "/bonus auto — ወደ ሰዓት ሠንጠረዥ መመለስ",
+              "/bonus rule 1 100 200 — የሠንጠረዥ #1 ወደ 100% (ከፍተኛ 200 ብር)",
+              "/bonus rule 1 off — የሠንጠረዥ #1 አጥፋ (on = አስጀምር)",
+              "",
+              "ለውጡ ከሚቀጥለው ዲፖዚት ማጽደቅ ጀምሮ ይሠራል። ቦነሱ ወደ Play ሂሳብ ብቻ ይገባል።"]
+    return "\n".join(lines)
+
+
+async def bonus_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/bonus - admin only: see and change the deposit bonus by hand (see bonus_status_text for the commands)."""
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.effective_message.reply_text("\U0001f6ab Unauthorized.")
+        return
+    args = [str(a).strip() for a in (getattr(context, "args", None) or [])]
+    loop = asyncio.get_running_loop()
+    reply = update.effective_message.reply_text
+
+    def num(x):
+        try:
+            return float(str(x).replace("%", "").replace(",", "."))
+        except ValueError:
+            return None
+
+    if not args:
+        await reply(await loop.run_in_executor(None, bonus_status_text))
+        return
+    a0 = args[0].lower()
+    done = None
+    if a0 == "auto":
+        await loop.run_in_executor(None, set_setting, "bonus_override_percent", -1)
+        await loop.run_in_executor(None, set_setting, "bonus_override_cap", 0)
+        done = "✅ ወደ ሰዓት ሠንጠረዥ ተመልሷል።"
+    elif a0 == "off":
+        await loop.run_in_executor(None, set_setting, "bonus_override_percent", 0)
+        await loop.run_in_executor(None, set_setting, "bonus_override_cap", 0)
+        done = "✅ ቦነስ ተዘግቷል (0%)። ለመመለስ: /bonus auto"
+    elif a0 == "rule":
+        rid = int(args[1]) if len(args) > 1 and args[1].isdigit() else None
+        a2 = args[2].lower() if len(args) > 2 else ""
+        pct = num(a2) if a2 not in ("on", "off") else None
+        if rid is None or not a2 or (a2 not in ("on", "off") and (pct is None or not 0 <= pct <= 1000)):
+            await reply("⚠️ አጠቃቀም: /bonus rule <ቁጥር> <በመቶ> [ከፍተኛ ብር]  ወይም  /bonus rule <ቁጥር> on|off\n\n"
+                        + await loop.run_in_executor(None, bonus_status_text))
+            return
+        with closing(db()) as con:
+            r = con.execute("SELECT * FROM bonus_rules WHERE id=?", (rid,)).fetchone()
+            if r is None:
+                await reply("⚠️ ሠንጠረዥ #%d አልተገኘም።" % rid)
+                return
+            if a2 in ("on", "off"):
+                con.execute("UPDATE bonus_rules SET active=? WHERE id=?", (1 if a2 == "on" else 0, rid))
+                done = "✅ ሠንጠረዥ #%d %s።" % (rid, "ተጀምሯል" if a2 == "on" else "ቆሟል")
+            else:
+                cap = num(args[3]) if len(args) > 3 else float(r["cap"])
+                if cap is None or cap < 0:
+                    await reply("⚠️ ከፍተኛው ብር ትክክል አይደለም።")
+                    return
+                con.execute("UPDATE bonus_rules SET percent=?, cap=? WHERE id=?", (pct, cap, rid))
+                done = "✅ ሠንጠረዥ #%d: %s%%%s" % (rid, money(pct), (" (እስከ %s ብር)" % money(cap)) if cap else "")
+            con.commit()
+    else:
+        pct = num(a0)
+        cap = num(args[1]) if len(args) > 1 else 0.0
+        if pct is None or not 0 <= pct <= 1000 or cap is None or cap < 0:
+            await reply("⚠️ ቁጥሩ ትክክል አይደለም።\n\n" + await loop.run_in_executor(None, bonus_status_text))
+            return
+        await loop.run_in_executor(None, set_setting, "bonus_override_percent", pct)
+        await loop.run_in_executor(None, set_setting, "bonus_override_cap", cap)
+        done = "✅ የዲፖዚት ቦነስ በእጅ ወደ %s%%%s ተቀምጧል።" % (money(pct), (" (እስከ %s ብር)" % money(cap)) if cap else "")
+    await reply(done + "\n\n" + await loop.run_in_executor(None, bonus_status_text))
+
+
 # these commands are defined after the main handler block above, so they are registered here
 bot_application.add_handler(CommandHandler("bal", bal_command))
 bot_application.add_handler(CommandHandler("audit", audit_command))
 bot_application.add_handler(CommandHandler("wipe", wipe_command))
 bot_application.add_handler(CommandHandler("commission", commission_command))
+bot_application.add_handler(CommandHandler("bonus", bonus_command))
 
 
 # ------------------------------ HTML & JS Assets ---------------------------
@@ -2409,7 +2522,7 @@ INDEX_HTML = r"""<!doctype html>
 <html lang="am"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="theme-color" content="#06180d"><title>&#x1260;&#x123D; &#x1260;&#x123D; &#x1262;&#x1295;&#x130E;</title><script src="https://telegram.org/js/telegram-web-app.js"></script><link rel="stylesheet" href="/static/style.css"></head>
 <body><main class="app-shell">
 <header class="topbar">
-  <div class="brand-info"><div class="eyebrow">&#x26A1; &#x1260;&#x123D; &#x1260;&#x123D; &#x1262;&#x1295;&#x130E; &#xB7; v17</div><h1 id="round-title">&#x12D9;&#x122D; #1</h1></div>
+  <div class="brand-info"><div class="eyebrow">&#x26A1; &#x1260;&#x123D; &#x1260;&#x123D; &#x1262;&#x1295;&#x130E; &#xB7; v18</div><h1 id="round-title">&#x12D9;&#x122D; #1</h1></div>
   <div class="top-scores">
     <div class="score-box"><span>PLAY</span><strong id="play-bal">0.00</strong></div>
     <div class="score-box win"><span>WIN</span><strong id="win-bal">0.00</strong></div>
@@ -2459,13 +2572,13 @@ INDEX_HTML = r"""<!doctype html>
     <h3>&#x1308;&#x1295;&#x12D8;&#x1265; &#x121B;&#x1235;&#x1308;&#x1263;&#x1275;</h3>
     <select id="deposit-method"></select>
     <div class="pay-box">
-      <div>📞 <span id="pay-number-label">ስልክ ቁጥር</span>: <b id="pay-number">0928564065</b> <button id="copy-pay" class="copy-btn" type="button">ቅዳ</button></div>
-      <div>👤 ስም: <b id="pay-name">Eineyew</b> · <span id="pay-method-label">Telebirr</span></div>
+      <div>📞 <span id="pay-number-label">ስልክ ቁጥር</span>: <b id="pay-number">0954302323</b> <button id="copy-pay" class="copy-btn" type="button">ቅዳ</button></div>
+      <div>👤 ስም: <b id="pay-name">Enyew</b> · <span id="pay-method-label">Telebirr</span></div>
     </div>
     <div id="bonus-banner" class="bonus-banner" style="display:none"></div>
     <input id="deposit-amount" type="number" placeholder="&#x1235;&#x1295;&#x1275; &#x1265;&#x122D;? (&#x1262;&#x12EB;&#x1295;&#x1235; 20)">
     <input id="deposit-reference" placeholder="Transaction ID / Ref ወይም የ SMS ጽሑፍ">
-    <div class="hint">1. ከላይ ወዳለው ቁጥር በመረጡት መንገድ (Telebirr / Abyssinia Bank / Ebirr) ይክፈሉ። 2. ከከፈሉ በኋላ የደረሰዎትን የግብይት ቁጥር (Transaction ID / Ref) ወይም የ SMS ጽሑፉን ሙሉ ያስገቡ። ክፍያው ሲረጋገጥ ወዲያውኑ ወደ ሂሳብዎ ይጨመራል። ዝቅተኛው 20 ብር ነው፤ ያስገቡት ብር ተመላሽ አይደረግም።</div>
+    <div class="hint">1. ከላይ ወዳለው ቁጥር በመረጡት መንገድ (Telebirr / Ebirr) ይክፈሉ። 2. ከከፈሉ በኋላ የደረሰዎትን የግብይት ቁጥር (Transaction ID / Ref) ወይም የ SMS ጽሑፉን ሙሉ ያስገቡ። ክፍያው ሲረጋገጥ ወዲያውኑ ወደ ሂሳብዎ ይጨመራል። ዝቅተኛው 20 ብር ነው፤ ያስገቡት ብር ተመላሽ አይደረግም።</div>
     <button id="send-deposit" class="primary-btn btn-deposit">&#x1325;&#x12EB;&#x1244; &#x120B;&#x12AD;</button>
   </div>
   <div id="withdraw-form" class="sub-form" style="display:none;">
