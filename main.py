@@ -101,6 +101,8 @@ SMS_SENDER = os.environ.get("SMS_SENDER", "").strip()  # optional: only accept S
 SMS_SENDERS = {x.strip().lower() for x in SMS_SENDER.split(",") if x.strip()}   # comma separated list is allowed
 RECEIPT_URL = "https://transactioninfo.ethiotelecom.et/receipt/"
 FINISHED_SECONDS = 4  # how long the "BINGO!" result stays on screen
+BONUS_FINISHED_SECONDS = 12   # v19: a bonus round's winner screen stays longer (the bonus show)
+BONUS_GRACE_MINUTES = 25      # v19: a bonus slot is started only within this many minutes after its time
 SUPPORT_USERNAME = os.environ.get("SUPPORT_USERNAME", "beshbesh08").strip().lstrip("@")
 VOICE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "voice")  # B1.mp3 ... O75.mp3
 
@@ -291,6 +293,24 @@ def init_db():
                 [("\u12a5\u1201\u12f5 100%", "6", 900, 1290, 100, 200),
                  ("\u1301\u121b 50%", "4", 900, 1290, 50, 200),
                  ("\u1260\u1218\u12a8\u1275\u120d 10%", "", 0, 1440, 10, 0)])
+        # ---- v19: round bonus slots (time is minutes after midnight, standard clock, Ethiopia time) ----
+        fresh_slots = con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='round_bonus_slots'").fetchone() is None
+        con.execute("""CREATE TABLE IF NOT EXISTS round_bonus_slots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL DEFAULT '',
+            minute INTEGER NOT NULL DEFAULT 0,
+            amount REAL NOT NULL DEFAULT 0,
+            active INTEGER NOT NULL DEFAULT 1,
+            last_fired TEXT NOT NULL DEFAULT ''
+        )""")
+        rcols = {r["name"] for r in con.execute("PRAGMA table_info(rounds)").fetchall()}
+        if "bonus" not in rcols:
+            con.execute("ALTER TABLE rounds ADD COLUMN bonus REAL NOT NULL DEFAULT 0")
+        if fresh_slots:
+            con.executemany(
+                "INSERT INTO round_bonus_slots(name, minute, amount, active) VALUES(?,?,?,1)",
+                [("ቀን ቦነስ", 12 * 60 + 30, 300), ("ምሽት ቦነስ", 20 * 60, 500)])   # 6:30 ከቀኑ and 2 ሰዓት ምሽት (Ethiopian clock)
         con.commit()
 
 
@@ -500,6 +520,11 @@ def fresh_game():
         "closing_number": None,       # the number that was called when the round closed
         "card_paid_from": {},         # (user_id, card_id) -> "credits" or "win" wallet
         "house_percent": house_percent(),   # v17: commission locked in when the round starts
+        "bonus_round": False,         # v19: this round is a full-card (blackout) bonus round
+        "bonus_amount": 0.0,          # v19: the owner's bonus (ETB) added to the winners' prize
+        "bonus_name": "",
+        "win_info": None,             # v19: {pool, bonus, total, n, share} of a finished bonus round
+        "manual_bonus": None,         # v19: /roundbonus now <amount> -> the next round is a bonus round
     }
 
 
@@ -553,6 +578,12 @@ def card_has_bingo(card, marked):
     return False
 
 
+def card_has_blackout(card, marked):
+    """v19: full-card bonus round - every number on the card (the middle FREE counts) is marked."""
+    marked = set(marked) | {"FREE"}
+    return all(card[r][c] in marked for r in range(5) for c in range(5))
+
+
 def winning_cells(card, marked):
     """v15: the cells [row, col] of every completed pattern (row, column, diagonal, four corners) on a card."""
     marked = set(marked) | {"FREE"}
@@ -591,6 +622,11 @@ def reset_round(refund=False):
         game_state["card_paid_from"] = {}
         game_state["house_percent"] = house_percent()   # v17: a changed commission applies from this new round
         game_state["finished_ends_at"] = 0
+        game_state["bonus_round"] = False
+        game_state["bonus_amount"] = 0.0
+        game_state["bonus_name"] = ""
+        game_state["win_info"] = None
+        maybe_start_bonus_round()   # v19: the NEW round becomes a bonus round when a bonus time has arrived
 
 
 def display_name(uid):
@@ -603,17 +639,18 @@ def display_name(uid):
 def find_winners():
     """Return [(uid, card_id)] for every player whose card currently has bingo. Needs game_lock."""
     winners = []
+    check = card_has_blackout if game_state.get("bonus_round") else card_has_bingo   # v19: bonus round = full card
     for uid, cards in game_state["player_cards"].items():
         for cid in cards:
             mat = game_state["card_matrices"].get((uid, cid))
             marked = game_state["marked"].get((uid, cid), {"FREE"})
-            if mat and card_has_bingo(mat, marked):
+            if mat and check(mat, marked):
                 winners.append((uid, cid))
                 break
     return winners
 
 
-def record_round(status, house, payout, winners):
+def record_round(status, house, payout, winners, bonus=0.0):
     """Save the finished round (money + who played + who won) to the history tables.
     Needs game_lock. Never raises: a history problem must not stop the game."""
     try:
@@ -628,11 +665,11 @@ def record_round(status, house, payout, winners):
         names = ", ".join("%s (#%s)" % (w["name"], w["card_id"]) for w in winners)
         with closing(db()) as con:
             cur = con.execute(
-                "INSERT INTO rounds(round_no, status, players, cards, pool, house_cut, payout, winners, called_count) "
-                "VALUES(?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO rounds(round_no, status, players, cards, pool, house_cut, payout, winners, called_count, bonus) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (game_state["round"], status, len(rows), sum(r[2] for r in rows),
                  float(game_state["prize"]), float(house), float(payout), names,
-                 len(game_state["called_numbers"])))
+                 len(game_state["called_numbers"]), float(bonus)))
             rid = cur.lastrowid
             con.executemany(
                 "INSERT INTO round_players(round_id, user_id, name, cards, stake, prize) VALUES(?,?,?,?,?,?)",
@@ -643,14 +680,19 @@ def record_round(status, house, payout, winners):
 
 
 def declare_winners(winners):
-    """Pay the prize (split between winners) and stop the round. Needs game_lock."""
-    # the owner keeps HOUSE_PERCENT of the pool; the rest is split between the winners
+    """Pay the prize (split between winners) and stop the round. Needs game_lock.
+    v19: in a bonus round the owner's bonus is added on top (no commission is taken from the bonus)."""
+    # the owner keeps house% of the pool; the rest is split between the winners
     # (integer cents, so no money is created or lost: left-over cents stay with the owner)
     pool_cents = int(round(float(game_state["prize"]) * 100))
     payout_cents = winners_cents(pool_cents, round_house_percent())   # v17: commission is editable (default 20%)
-    share_cents = payout_cents // len(winners)
+    bonus_cents = int(round(float(game_state.get("bonus_amount") or 0) * 100)) if game_state.get("bonus_round") else 0
+    total_cents = payout_cents + bonus_cents
+    n = len(winners)
+    share_cents = total_cents // n
     share = share_cents / 100.0
-    house = (pool_cents - share_cents * len(winners)) / 100.0
+    paid_cents = share_cents * n
+    house = (pool_cents - (paid_cents - bonus_cents)) / 100.0   # the part of the card money the owner keeps
     results = []
     for uid, cid in winners:
         update_credits(uid, share, is_win=True)
@@ -667,9 +709,123 @@ def declare_winners(winners):
                         "cells": winning_cells(mat, mk)})
     game_state["closing_number"] = game_state["current_number"]   # v15: the call the round closed on
     game_state["last_winners"] = results
-    record_round("won", house, share * len(winners), results)
+    game_state["win_info"] = ({"pool": payout_cents / 100.0, "bonus": bonus_cents / 100.0,
+                               "total": total_cents / 100.0, "n": n, "share": share} if bonus_cents else None)
+    record_round("won", house, paid_cents / 100.0, results, bonus_cents / 100.0)
     game_state["phase"] = "finished"
-    game_state["finished_ends_at"] = time.time() + FINISHED_SECONDS
+    game_state["finished_ends_at"] = time.time() + (BONUS_FINISHED_SECONDS if bonus_cents else FINISHED_SECONDS)
+    if bonus_cents:
+        try:
+            notify_admins("🎁 ቦነስ ዙር #%d አልቋል\nደራሽ: %s ብር + ቦነስ: %s ብር = %s ብር\nአሸናፊ(ዎች): %s\nለእያንዳንዳቸው: %s ብር"
+                          % (game_state["round"], money(payout_cents / 100.0), money(bonus_cents / 100.0),
+                             money(total_cents / 100.0), ", ".join("%s (#%s)" % (w["name"], w["card_id"]) for w in results),
+                             money(share)))
+        except Exception:
+            logger.exception("could not tell the admins about the bonus round")
+
+
+# ---------------- v19: round bonus (a full-card "ቦነስ ዙር" at set times) ----------------
+ROUND_PERIODS = {"ጠዋት": "morning", "ጥዋት": "morning", "morning": "morning",
+                 "ቀን": "afternoon", "ከቀኑ": "afternoon", "day": "afternoon", "afternoon": "afternoon",
+                 "ምሽት": "evening", "ማታ": "evening", "evening": "evening",
+                 "ሌሊት": "night", "night": "night"}
+ROUND_PERIOD_HOURS = {"morning": (12, 1, 2, 3, 4, 5), "afternoon": (6, 7, 8, 9, 10, 11),
+                      "evening": (12, 1, 2, 3, 4, 5), "night": (6, 7, 8, 9, 10, 11)}
+
+
+def eth_to_minutes(period, hour, minute):
+    """Ethiopian clock (period + hour + minute) -> minutes after midnight on the standard clock."""
+    base = {"morning": 6, "afternoon": 12, "evening": 18, "night": 0}[period]
+    first = 0 if period in ("morning", "evening") else 6
+    off = (((hour % 12) - first) % 12 + 12) % 12
+    return ((base + off) % 24) * 60 + minute
+
+
+def parse_eth_time(tokens):
+    """['ቀን', '6:30'] -> 750 (12:30 standard). Returns None when it is not a valid Ethiopian time."""
+    if len(tokens) < 2:
+        return None
+    p = ROUND_PERIODS.get(str(tokens[0]).lower())
+    m = re.fullmatch(r"(\d{1,2})(?:[:.](\d{1,2}))?", str(tokens[1]))
+    if not p or not m:
+        return None
+    h, mi = int(m.group(1)), int(m.group(2) or 0)
+    if h not in ROUND_PERIOD_HOURS[p] or not 0 <= mi < 60:
+        return None
+    return eth_to_minutes(p, h, mi)
+
+
+def maybe_start_bonus_round():
+    """Needs game_lock. Turns the round that has just started (selecting, nobody has a card yet) into a bonus round
+    when a bonus time has arrived (or the owner used /roundbonus now). A game that is already running is never cut:
+    the bonus simply waits for the next round."""
+    if game_state["phase"] != "selecting" or game_state.get("bonus_round"):
+        return
+    if any(game_state["player_cards"].values()):
+        return
+    amount, name = None, ""
+    manual = game_state.get("manual_bonus")
+    if manual:
+        amount, name = float(manual), "ቦነስ"
+        game_state["manual_bonus"] = None
+    else:
+        local = utc_now() + timedelta(hours=3)
+        today = local.strftime("%Y-%m-%d")
+        minute = local.hour * 60 + local.minute
+        with closing(db()) as con:
+            for r in con.execute("SELECT * FROM round_bonus_slots WHERE active=1 ORDER BY minute").fetchall():
+                if r["last_fired"] == today or minute < r["minute"]:
+                    continue
+                con.execute("UPDATE round_bonus_slots SET last_fired=? WHERE id=?", (today, r["id"]))
+                if minute - r["minute"] <= BONUS_GRACE_MINUTES and amount is None:
+                    amount, name = float(r["amount"]), r["name"]
+                # a slot whose time passed long ago (e.g. the bot was off) is skipped for today
+            con.commit()
+    if amount and amount > 0:
+        game_state["bonus_round"] = True
+        game_state["bonus_amount"] = amount
+        game_state["bonus_name"] = name
+        game_state["selection_ends_at"] = time.time() + SELECTION_TIME_SECONDS   # nobody has picked yet: a full timer
+        try:
+            notify_admins("🎁 ቦነስ ዙር ተጀመረ (ዙር #%d)\nቦነስ: %s ብር (ከእርስዎ ኪስ) · ሙሉ ዝግ" % (game_state["round"], money(amount)))
+        except Exception:
+            logger.exception("could not tell the admins about the bonus round start")
+
+
+_next_bonus_cache = {"t": 0.0, "v": None}
+
+
+def next_bonus_info():
+    """The next bonus the Mini App announces (cached for a few seconds), or None."""
+    if game_state.get("manual_bonus"):
+        return {"name": "ቦነስ", "amount": float(game_state["manual_bonus"]), "time_text": "", "mins_left": 0, "due": True}
+    if time.time() - _next_bonus_cache["t"] < 5:
+        return _next_bonus_cache["v"]
+    local = utc_now() + timedelta(hours=3)
+    today = local.strftime("%Y-%m-%d")
+    minute = local.hour * 60 + local.minute
+    best = None
+    with closing(db()) as con:
+        for r in con.execute("SELECT * FROM round_bonus_slots WHERE active=1").fetchall():
+            if r["last_fired"] != today and minute >= r["minute"] and minute - r["minute"] <= BONUS_GRACE_MINUTES:
+                left = 0   # its time has come: it starts with the next round
+            elif r["minute"] > minute and r["last_fired"] != today:
+                left = r["minute"] - minute
+            else:
+                left = r["minute"] + 1440 - minute
+            if best is None or left < best[0]:
+                best = (left, r)
+    val = None
+    if best:
+        left, r = best
+        val = {"name": r["name"], "amount": float(r["amount"]), "time_text": eth_clock(r["minute"]),
+               "mins_left": int(left), "due": left == 0}
+    _next_bonus_cache["t"], _next_bonus_cache["v"] = time.time(), val
+    return val
+
+
+def bonus_cache_reset():
+    _next_bonus_cache["t"] = 0.0
 
 
 def try_award(uid, username=""):
@@ -690,6 +846,8 @@ def game_loop_worker():
         time.sleep(1)
         try:
             with game_lock:
+                if game_state["phase"] == "selecting":
+                    maybe_start_bonus_round()   # v19: a bonus time may arrive while the room is empty
                 if game_state["phase"] == "finished" and time.time() >= game_state["finished_ends_at"]:
                     reset_round()
                 elif game_state["phase"] == "selecting" and time.time() >= game_state["selection_ends_at"]:
@@ -2509,12 +2667,135 @@ async def bonus_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await reply(done + "\n\n" + await loop.run_in_executor(None, bonus_status_text))
 
 
+def roundbonus_status_text():
+    with closing(db()) as con:
+        slots = con.execute("SELECT * FROM round_bonus_slots ORDER BY minute").fetchall()
+    lines = ["🎁 ቦነስ ዙር (ሙሉ ዝግ)", ""]
+    if game_state.get("bonus_round"):
+        lines.append("▶️ አሁን ያለው ዙር ቦነስ ዙር ነው: +%s ብር" % money(game_state.get("bonus_amount") or 0))
+    if game_state.get("manual_bonus"):
+        lines.append("⏭ ቀጣዩ ዙር ቦነስ ይሆናል: +%s ብር" % money(game_state["manual_bonus"]))
+    lines.append("📋 የቦነስ ሰዓቶች (የኢትዮጵያ ሰዓት):")
+    for r in slots:
+        lines.append("%s #%d %s · %s (መደበኛ %02d:%02d) · +%s ብር" % (
+            "✅" if r["active"] else "⏸", r["id"], r["name"] or "-", eth_clock(r["minute"]),
+            r["minute"] // 60, r["minute"] % 60, money(r["amount"])))
+    if not slots:
+        lines.append("— ምንም የለም —")
+    lines += ["",
+              "ለመቀየር:",
+              "/roundbonus 1 400 — የ#1 ቦነስ 400 ብር",
+              "/roundbonus 1 time ቀን 6:30 — ሰዓት መቀየር (ጠዋት / ቀን / ምሽት / ሌሊት)",
+              "/roundbonus 1 std 20:00 — በመደበኛ ሰዓት መቀየር",
+              "/roundbonus 1 on  ወይም  /roundbonus 1 off — ማብራት / ማጥፋት",
+              "/roundbonus add 300 ምሽት 2 — አዲስ ቦነስ መጨመር",
+              "/roundbonus del 1 — መሰረዝ",
+              "/roundbonus now 400 — ቀጣዩ ዙር ወዲያውኑ ቦነስ ዙር (400 ብር)",
+              "/roundbonus cancel — «now»ን መሰረዝ",
+              "",
+              "ሰዓቱ ሲደርስ እየተጫወተ ያለው ጨዋታ እስኪያልቅ ይጠብቃል፤ ከዚያ ቀጣዩ ዙር ቦነስ ዙር ይሆናል።"]
+    return "\n".join(lines)
+
+
+async def roundbonus_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/roundbonus - admin only: the full-card bonus rounds (times and amounts)."""
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.effective_message.reply_text("\U0001f6ab Unauthorized.")
+        return
+    args = [str(a).strip() for a in (getattr(context, "args", None) or [])]
+    loop = asyncio.get_running_loop()
+    reply = update.effective_message.reply_text
+
+    def num(x):
+        try:
+            return float(str(x).replace(",", "."))
+        except ValueError:
+            return None
+
+    async def status():
+        return await loop.run_in_executor(None, roundbonus_status_text)
+
+    if not args:
+        await reply(await status())
+        return
+    a0 = args[0].lower()
+    done = None
+    if a0 == "now":
+        amount = num(args[1]) if len(args) > 1 else None
+        if not amount or amount <= 0 or amount > 100000:
+            await reply("⚠️ አጠቃቀም: /roundbonus now 400")
+            return
+        with game_lock:
+            game_state["manual_bonus"] = amount
+            maybe_start_bonus_round()   # starts at once when the room is empty, otherwise with the next round
+            started = bool(game_state.get("bonus_round"))
+        bonus_cache_reset()
+        done = ("✅ ቦነስ ዙር +%s ብር ተጀምሯል።" if started else "✅ ቀጣዩ ዙር ቦነስ ዙር (+%s ብር) ይሆናል።") % money(amount)
+    elif a0 == "cancel":
+        with game_lock:
+            game_state["manual_bonus"] = None
+        bonus_cache_reset()
+        done = "✅ ተሰርዟል።"
+    elif a0 == "add":
+        amount = num(args[1]) if len(args) > 1 else None
+        minute = parse_eth_time(args[2:4])
+        if not amount or amount <= 0 or minute is None:
+            await reply("⚠️ አጠቃቀም: /roundbonus add 300 ምሽት 2\n(ጠዋት/ቀን/ምሽት/ሌሊት + ሰዓት፣ ለምሳሌ ቀን 6:30)")
+            return
+        with closing(db()) as con:
+            con.execute("INSERT INTO round_bonus_slots(name, minute, amount, active) VALUES(?,?,?,1)", ("ቦነስ", minute, amount))
+            con.commit()
+        bonus_cache_reset()
+        done = "✅ አዲስ ቦነስ ተጨምሯል: %s · +%s ብር" % (eth_clock(minute), money(amount))
+    elif a0 == "del" and len(args) > 1 and args[1].isdigit():
+        with closing(db()) as con:
+            n = con.execute("DELETE FROM round_bonus_slots WHERE id=?", (int(args[1]),)).rowcount
+            con.commit()
+        bonus_cache_reset()
+        done = "✅ #%s ተሰርዟል።" % args[1] if n else "⚠️ #%s አልተገኘም።" % args[1]
+    elif a0.isdigit() and len(args) > 1:
+        rid, sub = int(a0), args[1].lower()
+        with closing(db()) as con:
+            r = con.execute("SELECT * FROM round_bonus_slots WHERE id=?", (rid,)).fetchone()
+            if r is None:
+                await reply("⚠️ #%d አልተገኘም።" % rid)
+                return
+            if sub in ("on", "off"):
+                con.execute("UPDATE round_bonus_slots SET active=? WHERE id=?", (1 if sub == "on" else 0, rid))
+                done = "✅ #%d %s።" % (rid, "ተጀምሯል" if sub == "on" else "ቆሟል")
+            elif sub in ("time", "std"):
+                if sub == "time":
+                    minute = parse_eth_time(args[2:4])
+                else:
+                    m = re.fullmatch(r"(\d{1,2})[:.](\d{2})", args[2]) if len(args) > 2 else None
+                    minute = (int(m.group(1)) * 60 + int(m.group(2))) if m and int(m.group(1)) < 24 and int(m.group(2)) < 60 else None
+                if minute is None:
+                    await reply("⚠️ ሰዓቱ ትክክል አይደለም።\n\n" + await status())
+                    return
+                con.execute("UPDATE round_bonus_slots SET minute=?, last_fired='' WHERE id=?", (minute, rid))
+                done = "✅ #%d ሰዓት: %s" % (rid, eth_clock(minute))
+            else:
+                amount = num(sub)
+                if not amount or amount <= 0 or amount > 100000:
+                    await reply("⚠️ መጠኑ ትክክል አይደለም።\n\n" + await status())
+                    return
+                con.execute("UPDATE round_bonus_slots SET amount=? WHERE id=?", (amount, rid))
+                done = "✅ #%d ቦነስ: +%s ብር" % (rid, money(amount))
+            con.commit()
+        bonus_cache_reset()
+    else:
+        await reply("⚠️ ትዕዛዙ አልገባኝም።\n\n" + await status())
+        return
+    await reply(done + "\n\n" + await status())
+
+
 # these commands are defined after the main handler block above, so they are registered here
 bot_application.add_handler(CommandHandler("bal", bal_command))
 bot_application.add_handler(CommandHandler("audit", audit_command))
 bot_application.add_handler(CommandHandler("wipe", wipe_command))
 bot_application.add_handler(CommandHandler("commission", commission_command))
 bot_application.add_handler(CommandHandler("bonus", bonus_command))
+bot_application.add_handler(CommandHandler("roundbonus", roundbonus_command))
 
 
 # ------------------------------ HTML & JS Assets ---------------------------
@@ -2522,7 +2803,7 @@ INDEX_HTML = r"""<!doctype html>
 <html lang="am"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="theme-color" content="#06180d"><title>&#x1260;&#x123D; &#x1260;&#x123D; &#x1262;&#x1295;&#x130E;</title><script src="https://telegram.org/js/telegram-web-app.js"></script><link rel="stylesheet" href="/static/style.css"></head>
 <body><main class="app-shell">
 <header class="topbar">
-  <div class="brand-info"><div class="eyebrow">&#x26A1; &#x1260;&#x123D; &#x1260;&#x123D; &#x1262;&#x1295;&#x130E; &#xB7; v18</div><h1 id="round-title">&#x12D9;&#x122D; #1</h1></div>
+  <div class="brand-info"><div class="eyebrow">&#x26A1; &#x1260;&#x123D; &#x1260;&#x123D; &#x1262;&#x1295;&#x130E; &#xB7; v19</div><h1 id="round-title">&#x12D9;&#x122D; #1</h1></div>
   <div class="top-scores">
     <div class="score-box"><span>PLAY</span><strong id="play-bal">0.00</strong></div>
     <div class="score-box win"><span>WIN</span><strong id="win-bal">0.00</strong></div>
@@ -2531,7 +2812,9 @@ INDEX_HTML = r"""<!doctype html>
   </div>
 </header>
 
-<div id="prize-bar" class="prize-bar">&#x1F3C6; &#x12F0;&#x1228;&#x123D;: <b id="prize-amt">0.00</b> &#x1265;&#x122D; <span id="prize-cards"></span></div>
+<div id="prize-bar" class="prize-bar">&#x1F3C6; &#x12F0;&#x1228;&#x123D;: <b id="prize-amt">0.00</b> &#x1265;&#x122D; <span id="prize-cards"></span> <span id="prize-bonus" class="prize-bonus" style="display:none"></span></div>
+<div id="bonus-live" class="bonus-live" style="display:none"></div>
+<div id="bonus-next" class="bonus-next" style="display:none"></div>
 <div id="phase-banner" class="phase-banner"></div>
 
 <section class="game-panel" id="selection-panel">
@@ -2604,7 +2887,7 @@ INDEX_HTML = r"""<!doctype html>
   <button class="nav-btn" id="nav-rules" onclick="openRules()">&#x1F4DC; &#x1205;&#x130D;</button>
 </nav>
 </main>
-<div id="win-overlay" class="win-overlay" style="display:none"><div class="win-box"><div class="win-title">&#x1F389; BINGO! &#x1F389;</div><div id="win-names" class="win-line"></div><div id="win-prize" class="win-line"></div><div id="win-cards" class="win-cards"></div><div id="win-call" class="win-call"></div><div id="win-next" class="win-sub"></div></div></div>
+<div id="win-overlay" class="win-overlay" style="display:none"><canvas id="confetti" class="confetti"></canvas><div class="win-box"><div class="win-title">&#x1F389; BINGO! &#x1F389;</div><div id="win-names" class="win-line"></div><div id="win-prize" class="win-line"></div><div id="win-cards" class="win-cards"></div><div id="win-call" class="win-call"></div><div id="win-bonus" class="win-bonus" style="display:none"></div><div id="win-next" class="win-sub"></div></div></div>
 <div id="rules-overlay" class="rules-overlay" style="display:none">
   <div class="rules-sheet">
     <div class="rules-head"><button id="rules-close" class="rules-close">&#x12DD;&#x130B;</button><div class="rules-title">&#x12E8;&#x1328;&#x12CB;&#x1273;&#x12CD; &#x1218;&#x1218;&#x122A;&#x12EB; &#x12A5;&#x1293; &#x12F0;&#x1295;&#x1265;</div></div>
@@ -2677,6 +2960,7 @@ ADMIN_HTML = r"""<!doctype html><html lang="am"><head><meta charset="utf-8"><met
 <div class="grid2"><input type="number" id="pc-max" placeholder="&#x12A8;&#x134D;&#x1270;&#x129B; &#x1270;&#x1320;&#x1243;&#x121A; &#x1265;&#x12DB;&#x1275; (0 = &#x12EB;&#x120D;&#x1270;&#x12C8;&#x1230;&#x1290;)"><input type="date" id="pc-exp" title="&#x12E8;&#x121A;&#x12EB;&#x1260;&#x1243;&#x1260;&#x1275; &#x1240;&#x1295;"></div>
 <div><input type="number" id="pc-min" placeholder="ዝቅተኛ ጠቅላላ ተቀማጭ (ብር) — ለምሳሌ 100፣ 150፣ 200 (0 = ለሁሉም)"></div>
 <button id="pc-save" class="primary-btn">&#x1F4BE; &#x12AE;&#x12F1;&#x1295; &#x12A0;&#x1235;&#x1240;&#x121D;&#x1325;</button></div><div id="promo-list"></div>
+<h2>🎁 ቦነስ ዙር (ሙሉ ዝግ)</h2><div id="rb-box"></div><button id="rb-add" class="primary-btn">➕ አዲስ ቦነስ</button><div class="eth">ሰዓቱ ሲደርስ የሚጫወተው ጨዋታ ሲያልቅ ቀጣዩ ዙር ቦነስ ዙር ይሆናል። ደራሹ + ቦነሱ ለአሸናፊው (ወይም ለአሸናፊዎች እኩል) ይሰጣል። በቦቱ ውስጥ በ /roundbonus ም መቀየር ይችላሉ።</div>
 <h2>&#x1F517; &#x122A;&#x1348;&#x122B;&#x120D;</h2><div id="ref-box"></div>
 <script src="/static/admin.js"></script></body></html>"""
 
@@ -2800,6 +3084,18 @@ input,select{width:100%;background:var(--panel2);border:1px solid var(--line);pa
 .eth{color:var(--gold);font-size:12px}
 .call-count{text-align:center;font-size:12px;font-weight:800;color:var(--gold);margin-top:4px}
 .rule-card input[type=checkbox]{width:auto;min-width:0;height:auto;margin:0 4px;padding:0;vertical-align:middle}
+.bonus-next{background:linear-gradient(90deg,#3b0764,#7e22ce,#3b0764);border:1px solid #f0abfc;color:#fff;padding:9px 8px;border-radius:10px;text-align:center;font-size:13px;font-weight:800;margin-bottom:8px;animation:bnpulse 2s ease-in-out infinite}
+.bonus-next b{color:var(--gold)}
+@keyframes bnpulse{0%,100%{box-shadow:0 0 0 rgba(240,171,252,0)}50%{box-shadow:0 0 18px rgba(240,171,252,.75)}}
+.bonus-live{background:linear-gradient(135deg,#ffe629,#f59e0b);color:#2a1d00;padding:9px 8px;border-radius:10px;text-align:center;font-weight:900;font-size:13px;margin-bottom:8px;animation:popb 1s ease-in-out infinite alternate}
+.prize-bar.bonus{background:linear-gradient(90deg,#4a1d96,#b45309,#4a1d96);background-size:200% 100%;animation:shimmer 3s linear infinite;border-color:#fff0a0;box-shadow:0 0 22px rgba(255,230,41,.6)}
+.prize-bonus{display:inline-block;margin-left:6px;padding:2px 12px;border-radius:20px;background:#ffe629;color:#2a1d00;font-size:16px;font-weight:900;animation:popb 1.2s ease-in-out infinite alternate}
+@keyframes shimmer{to{background-position:200% 0}}
+@keyframes popb{from{transform:scale(1)}to{transform:scale(1.08)}}
+.win-box{position:relative;z-index:3}
+.win-bonus{margin-top:12px;padding:12px;border-radius:16px;background:linear-gradient(135deg,#ffe629,#f59e0b);color:#2a1d00;font-weight:900;box-shadow:0 0 30px rgba(255,230,41,.8);animation:popb .7s ease-in-out infinite alternate}
+.win-bonus .eq{font-size:15px}.win-bonus .tot{font-size:38px;line-height:1.15}
+.confetti{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:4}
 """
 
 APP_JS = r"""(() => {
@@ -2917,6 +3213,115 @@ function renderPayBox() {
   document.getElementById('pay-method-label').textContent = m.label;
 }
 // v15: the winner's card - winning pattern cells green, the other called (marked) numbers orange
+// ---------- v19: bonus round (look + sound) ----------
+let bonusStartRound = null, bonusShownRound = null, confettiRaf = null;
+function fmtMoney(v) { return Number(v).toFixed(2).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1'); }
+function fmtMins(m) {
+  const h = Math.floor(m / 60), mm = m % 60;
+  return (h ? h + ' ሰዓት ' : '') + (mm || !h ? mm + ' ደቂቃ' : '');
+}
+function bell(f, at, dur, vol) {
+  const c = getCtx(); if (!c) return;
+  try {
+    [1, 2.01].forEach((m, k) => {
+      const o = c.createOscillator(), g = c.createGain();
+      o.type = 'sine'; o.frequency.value = f * m;
+      o.connect(g); g.connect(c.destination);
+      g.gain.setValueAtTime(0.0001, at);
+      g.gain.exponentialRampToValueAtTime(k ? vol * 0.4 : vol, at + 0.012);
+      g.gain.exponentialRampToValueAtTime(0.0001, at + dur);
+      o.start(at); o.stop(at + dur + 0.05);
+    });
+  } catch (e) {}
+}
+function chime() {   // the bonus round starts
+  if (!soundOn) return;
+  const c = getCtx(); if (!c) return;
+  if (c.state === 'suspended') c.resume();
+  const t = c.currentTime;
+  [784, 988, 1319, 1568].forEach((f, i) => bell(f, t + i * 0.14, 0.45, 0.2));
+}
+function bonusFanfare() {   // the bonus is revealed
+  if (!soundOn) return;
+  const c = getCtx(); if (!c) return;
+  if (c.state === 'suspended') c.resume();
+  const t = c.currentTime;
+  [523.25, 659.25, 783.99, 1046.5, 783.99, 1046.5, 1318.5, 1568].forEach((f, i) => bell(f, t + i * 0.13, 0.55, 0.22));
+  for (let i = 0; i < 16; i++) bell(2000 + Math.random() * 2200, t + 1.0 + i * 0.11, 0.2, 0.07);
+  [523.25, 659.25, 783.99, 1046.5].forEach(f => bell(f, t + 1.3, 1.5, 0.17));
+}
+function stopConfetti() {
+  if (confettiRaf) { cancelAnimationFrame(confettiRaf); confettiRaf = null; }
+  const cv = document.getElementById('confetti');
+  if (cv) { const x = cv.getContext('2d'); x.clearRect(0, 0, cv.width, cv.height); }
+}
+function startConfetti() {
+  const cv = document.getElementById('confetti'); if (!cv) return;
+  cv.width = cv.clientWidth || window.innerWidth; cv.height = cv.clientHeight || window.innerHeight;
+  const ctx = cv.getContext('2d');
+  const cols = ['#ffe629', '#39d66f', '#ff4d6d', '#4dabf7', '#ffffff', '#f59e0b', '#c084fc'];
+  const ps = [];
+  for (let i = 0; i < 170; i++) ps.push({ x: Math.random() * cv.width, y: -20 - Math.random() * cv.height * 0.7,
+    r: 4 + Math.random() * 6, c: cols[i % cols.length], vx: (Math.random() - 0.5) * 3, vy: 2 + Math.random() * 4,
+    rot: Math.random() * 6, vr: (Math.random() - 0.5) * 0.3 });
+  const end = performance.now() + 9500;
+  function draw(now) {
+    ctx.clearRect(0, 0, cv.width, cv.height);
+    ps.forEach(p => {
+      p.x += p.vx; p.y += p.vy; p.rot += p.vr;
+      if (p.y > cv.height + 20 && now < end - 1800) { p.y = -20; p.x = Math.random() * cv.width; }
+      ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.rot); ctx.fillStyle = p.c;
+      ctx.fillRect(-p.r, -p.r / 2, p.r * 2, p.r); ctx.restore();
+    });
+    if (now < end) confettiRaf = requestAnimationFrame(draw); else { ctx.clearRect(0, 0, cv.width, cv.height); confettiRaf = null; }
+  }
+  if (confettiRaf) cancelAnimationFrame(confettiRaf);
+  confettiRaf = requestAnimationFrame(draw);
+}
+function renderBonusUI() {
+  const brd = !!model.bonus_round;
+  const pb = document.getElementById('prize-bar'); if (pb) pb.classList.toggle('bonus', brd);
+  const chip = document.getElementById('prize-bonus');
+  if (chip) { chip.style.display = brd ? 'inline-block' : 'none'; chip.textContent = brd ? ('🎁 +' + fmtMoney(model.bonus_amount) + ' ቦነስ') : ''; }
+  const live = document.getElementById('bonus-live');
+  if (live) {
+    const show = brd && model.phase !== 'finished';
+    live.style.display = show ? 'block' : 'none';
+    if (show) live.textContent = '🎁 ቦነስ ዙር · ሙሉ ዝግ — ሁሉንም ቁጥር ዘግቶ የሚያጠናቅቅ ደራሹንና +' + fmtMoney(model.bonus_amount) + ' ብር ቦነሱን ይወስዳል!';
+  }
+  const nxt = document.getElementById('bonus-next'), nb = model.next_bonus;
+  if (nxt) {
+    if (!brd && nb) {
+      let when = nb.due ? 'ከሚቀጥለው ዙር ይጀምራል!' : (nb.mins_left <= 180 ? ('በ ' + fmtMins(nb.mins_left) + ' ውስጥ') : nb.time_text);
+      nxt.style.display = 'block';
+      nxt.innerHTML = '🎁 ቀጣይ ቦነስ ዙር · ' + (nb.time_text && !nb.due && nb.mins_left <= 180 ? nb.time_text + ' · ' : '') +
+        '<b>+' + fmtMoney(nb.amount) + ' ብር</b> · ሙሉ ዝግ<br>⏳ ' + when;
+    } else nxt.style.display = 'none';
+  }
+  if (brd && bonusStartRound !== model.round && model.phase !== 'finished') { bonusStartRound = model.round; chime(); }
+  if (model.phase !== 'finished') stopConfetti();
+}
+function renderWinBonus(w) {
+  const box = document.getElementById('win-bonus'); if (!box) return;
+  const wi = model.win_info;
+  if (!wi || !(wi.bonus > 0)) { box.style.display = 'none'; return; }
+  if (bonusShownRound === model.round) return;
+  bonusShownRound = model.round;
+  box.innerHTML = '<div class="eq">ደራሽ ' + fmtMoney(wi.pool) + ' + 🎁 ቦነስ ' + fmtMoney(wi.bonus) + '</div>' +
+    '<div class="tot" id="win-tot">' + fmtMoney(wi.pool) + ' ብር</div>' +
+    (w.length > 1 ? '<div class="eq">ለእያንዳንዳቸው ' + fmtMoney(wi.share) + ' ብር (' + w.length + ' አሸናፊዎች)</div>' : '');
+  box.style.display = 'block';
+  const t0 = performance.now() + 1200, dur = 2200;
+  function step(now) {
+    const el = document.getElementById('win-tot'); if (!el || bonusShownRound !== model.round) return;
+    const p = Math.min(1, Math.max(0, (now - t0) / dur));
+    el.textContent = fmtMoney(wi.pool + (wi.total - wi.pool) * p) + ' ብር';
+    if (p < 1) requestAnimationFrame(step);
+  }
+  requestAnimationFrame(step);
+  for (let i = 0; i < 12; i++) setTimeout(() => beep(500 + i * 70, 0.06, 0.1), 1200 + i * 180);
+  setTimeout(startConfetti, 1100);
+}
 let winCardsKey = null;
 function renderWinCards(winners, round) {
   const box = document.getElementById('win-cards'); if (!box) return;
@@ -2957,6 +3362,7 @@ function render() {
   document.getElementById('round-title').textContent = '\u12D9\u122D #' + model.round;
   document.getElementById('prize-amt').textContent = Number(model.prize_payout || 0).toFixed(2);
   document.getElementById('prize-cards').textContent = (model.taken_cards || []).length ? '\u00B7 ' + (model.taken_cards || []).length + ' \u12AB\u122D\u12F5' : '';
+  renderBonusUI();
   document.getElementById('play-bal').textContent = model.credits.toFixed(2);
   document.getElementById('win-bal').textContent = (model.win_credits || 0).toFixed(2);
   document.getElementById('w-play').textContent = model.credits.toFixed(2);
@@ -2997,10 +3403,11 @@ function render() {
     banner.textContent = '\uD83C\uDFC6 BINGO! ' + w.map(x => x.name + ' (\u12AB\u122D\u12F5 #' + x.card_id + ')').join(', ') +
       ' \u2014 ' + (w[0] ? w[0].prize : 0) + ' ETB \u00B7 \u12A0\u12F2\u1235 \u12D9\u122D \u1260 ' + rem + ' \u1230';
     banner.style.display = isBingo ? 'block' : 'none';
-    if (announcedRound !== model.round) { announcedRound = model.round; announceBingo(); }
+    if (announcedRound !== model.round) { announcedRound = model.round; announceBingo(); if (model.win_info && model.win_info.bonus > 0) setTimeout(bonusFanfare, 1100); }
     document.getElementById('win-names').textContent = w.map(x => x.name + ' \u2014 \u12AB\u122D\u12F5 #' + x.card_id).join('\n');
     document.getElementById('win-prize').textContent = '\u123D\u120D\u121B\u1275: ' + (w[0] ? w[0].prize : 0) + ' \u1265\u122D' + (w.length > 1 ? ' (\u1208\u12A5\u12EB\u1295\u12F3\u1295\u12F3\u1278\u12CD)' : '');
     renderWinCards(w, model.round);
+    renderWinBonus(w);
     document.getElementById('win-call').textContent = (model.closing_number !== null && model.closing_number !== undefined) ? String(model.closing_number) : '';
     document.getElementById('win-next').textContent = '\u12A0\u12F2\u1235 \u12D9\u122D \u1260 ' + rem + ' \u1230\u12A8\u1295\u12F5 \u12CD\u1235\u1325 \u12ED\u1300\u121D\u122B\u120D';
   } else {
@@ -3256,6 +3663,7 @@ function statCard(title, o) {
     `<p>\u12F5\u122D\u123B\u12EC: <b>${birr(o.house)} \u1265\u122D</b></p>` +
     `<p>\u1208\u12A0\u1238\u1293\u134A\u12CE\u127D \u12E8\u1270\u12A8\u1348\u1208: ${birr(o.payout)} \u1265\u122D</p>` +
     `<p>\u12E8\u1308\u1263 \u12F2\u1356\u12DA\u1275 (\u12E8\u1338\u12F0\u1240): ${birr(o.deposits)} \u1265\u122D</p>` +
+    (Number(o.bonus) > 0 ? `<p>🎁 ቦነስ የተከፈለ: ${birr(o.bonus)} ብር · ትርፍ ከቦነስ በኋላ: <b>${birr(o.house - o.bonus)} ብር</b></p>` : '') +
     (o.withdrawals !== undefined ? `<p>\u12E8\u12C8\u1323 (\u12E8\u1270\u12A8\u1348\u1208): ${birr(o.withdrawals)} \u1265\u122D</p>` : '') + `</div>`;
 }
 function renderHistory(list) {
@@ -3266,6 +3674,7 @@ function renderHistory(list) {
       `<p>\uD83C\uDFAE \u1270\u132B\u12CB\u127E\u127D: ${Number(h.players)} \u00B7 \uD83C\uDCCF \u12AB\u122D\u12F6\u127D: ${Number(h.cards)} \u00B7 \u12E8\u1270\u1320\u1229 \u1241\u1325\u122E\u127D: ${Number(h.called_count)}</p>` +
       `<p>\uD83D\uDCB0 \u1320\u1245\u120B\u120B: ${birr(h.pool)} \u1265\u122D \u00B7 \u12F5\u122D\u123B\u12EC: <b>${birr(h.house_cut)}</b> \u00B7 \u1208\u12A0\u1238\u1293\u134A: ${birr(h.payout)}</p>` +
       (h.winners ? `<p>\uD83C\uDFC6 \u12A0\u1238\u1293\u134A: ${esc(h.winners)}</p>` : '') +
+      (Number(h.bonus) > 0 ? `<p>🎁 ቦነስ ዙር: <b>+${birr(h.bonus)} ብር</b> (ከባለቤቱ)</p>` : '') +
       `<button onclick="showRound(${Number(h.id)})" style="${BTN}background:#102d19;color:#f4f7f4;border:1px solid #20552d">\uD83D\uDC65 \u1270\u132B\u12CB\u127E\u127D\u1295 \u12A0\u1233\u12ED</button>` +
       `<div id="rp-${Number(h.id)}"></div></div>`;
   }).join('') || '\u2014';
@@ -3556,7 +3965,36 @@ document.getElementById('cb-save').onclick = async () => {
     loadSettings();
   }
 };
-document.getElementById('refresh').onclick = () => { load(); loadSettings(); loadPlayers(); }; load(); loadSettings(); loadPlayers();
+let RB = [];
+function rbCard(r, i) {
+  return `<div class="rule-card"><input type="text" id="rb${i}-n" placeholder="ስም" value="${esc(r.name)}">` +
+    `<div class="grid2"><div>ሰዓት (መደበኛ)<input type="time" id="rb${i}-t" value="${hhmm(r.minute)}" oninput="rbEth(${i})"></div>` +
+    `<div>ቦነስ (ብር)<input type="number" id="rb${i}-a" value="${Number(r.amount)}"></div></div><div class="eth" id="rb${i}-eth"></div>` +
+    `<label><input type="checkbox" id="rb${i}-on" ${r.active ? 'checked' : ''}> ንቁ</label> ` +
+    `<button onclick="rbSave(${i})" style="${BTN}background:#39d66f">💾 አስቀምጥ</button>` +
+    (r.id ? `<button onclick="rbDel(${i})" style="${BTN}background:#d63939;color:#fff">🗑 ሰርዝ</button>` : '') + `</div>`;
+}
+function rbEth(i) {
+  const m = toMin(document.getElementById('rb' + i + '-t').value, false);
+  document.getElementById('rb' + i + '-eth').textContent = '🕒 የኢትዮጵያ ሰዓት: ' + ethTime(m);
+}
+function renderRB(list) {
+  RB = list;
+  document.getElementById('rb-box').innerHTML = list.map(rbCard).join('') || '—';
+  list.forEach((r, i) => rbEth(i));
+}
+async function loadRB() {
+  try { const r = await fetch('/api/admin/round-bonus', {headers: HEADERS()}); if (r.ok) renderRB((await r.json()).slots); } catch (e) {}
+}
+async function rbSave(i) {
+  const g = id => document.getElementById('rb' + i + '-' + id);
+  const ok = await postJson('/api/admin/round-bonus', {id: RB[i].id || null, name: g('n').value, minute: toMin(g('t').value, false),
+    amount: Number(g('a').value), active: g('on').checked});
+  if (ok) { alert('ተቀምጧል ✅'); loadRB(); }
+}
+async function rbDel(i) { if (confirm('ይሰረዝ?') && await postJson('/api/admin/round-bonus', {id: RB[i].id, delete: true})) loadRB(); }
+document.getElementById('rb-add').onclick = () => { RB.push({id: null, name: 'ቦነስ', minute: 1200, amount: 300, active: 1}); renderRB(RB); };
+document.getElementById('refresh').onclick = () => { load(); loadSettings(); loadPlayers(); loadRB(); }; load(); loadSettings(); loadPlayers(); loadRB();
 setInterval(loadLive, 5000);
 setInterval(() => { if (!document.hidden) loadPlayers(); }, 10000);
 """
@@ -3652,6 +4090,11 @@ def api_miniapp_game():
             "my_cards_data": my_cards_data,
             "finished_ends_at": game_state["finished_ends_at"],
             "closing_number": game_state.get("closing_number"),
+            "bonus_round": bool(game_state.get("bonus_round")),
+            "bonus_amount": float(game_state.get("bonus_amount") or 0),
+            "bonus_name": game_state.get("bonus_name") or "",
+            "win_info": game_state.get("win_info"),
+            "next_bonus": next_bonus_info(),
             "winners": [{"name": w["name"], "card_id": w["card_id"], "prize": w["prize"],
                          "matrix": w.get("matrix"), "marked": w.get("marked", []), "cells": w.get("cells", [])}
                         for w in game_state["last_winners"]],
@@ -3847,12 +4290,12 @@ def money_stats(con, today_only):
     r_cond = day % "created_at" if today_only else "1=1"
     row = con.execute(
         "SELECT COUNT(*) AS n, COALESCE(SUM(CASE WHEN status='won' THEN pool END),0) AS sales, "
-        "COALESCE(SUM(house_cut),0) AS house, COALESCE(SUM(payout),0) AS payout "
+        "COALESCE(SUM(house_cut),0) AS house, COALESCE(SUM(payout),0) AS payout, COALESCE(SUM(bonus),0) AS bonus "
         "FROM rounds WHERE " + r_cond).fetchone()
     d_cond = ("status='approved' AND " + (day % "reviewed_at")) if today_only else "status='approved'"
     deposits = con.execute("SELECT COALESCE(SUM(amount),0) FROM deposit_requests WHERE " + d_cond).fetchone()[0]
     out = {"rounds": row["n"], "sales": row["sales"], "house": row["house"],
-           "payout": row["payout"], "deposits": deposits}
+           "payout": row["payout"], "bonus": row["bonus"], "deposits": deposits}
     if today_only:
         out["players"] = con.execute(
             "SELECT COUNT(DISTINCT rp.user_id) FROM round_players rp JOIN rounds r ON r.id=rp.round_id WHERE "
@@ -4201,6 +4644,48 @@ def admin_claim_bonus():
     if b.get("announce"):
         threading.Thread(target=broadcast_claim_bonus, args=(bid,), daemon=True, name="claim-broadcast").start()
     return jsonify({"ok": True, "id": bid})
+
+
+@app.get("/api/admin/round-bonus")
+def admin_round_bonus_get():
+    user = api_admin()
+    if not user:
+        return json_error("Admin access denied", 403)
+    with closing(db()) as con:
+        rows = [dict(r) for r in con.execute("SELECT * FROM round_bonus_slots ORDER BY minute").fetchall()]
+    return jsonify({"slots": rows})
+
+
+@app.post("/api/admin/round-bonus")
+def admin_round_bonus_post():
+    user = api_admin()
+    if not user:
+        return json_error("Admin access denied", 403)
+    b = request.get_json(silent=True) or {}
+    sid = b.get("id")
+    with closing(db()) as con:
+        if b.get("delete"):
+            con.execute("DELETE FROM round_bonus_slots WHERE id=?", (int(sid or 0),))
+            con.commit()
+            bonus_cache_reset()
+            return jsonify({"ok": True})
+        try:
+            minute, amount = int(b.get("minute")), float(b.get("amount"))
+        except (TypeError, ValueError):
+            return json_error("ትክክል ያልሆነ መረጃ")
+        if not (0 <= minute < 1440) or not (0 < amount <= 100000):
+            return json_error("ሰዓቱን ወይም መጠኑን ያረጋግጡ")
+        name = str(b.get("name") or "ቦነስ")[:40]
+        active = 1 if b.get("active") else 0
+        if sid:
+            con.execute("UPDATE round_bonus_slots SET name=?, minute=?, amount=?, active=?, last_fired='' WHERE id=?",
+                        (name, minute, amount, active, int(sid)))
+        else:
+            con.execute("INSERT INTO round_bonus_slots(name, minute, amount, active) VALUES(?,?,?,?)",
+                        (name, minute, amount, active))
+        con.commit()
+    bonus_cache_reset()
+    return jsonify({"ok": True})
 
 
 @app.post("/telegram-webhook" if not WEBHOOK_SECRET_PATH else "/telegram-webhook/" + WEBHOOK_SECRET_PATH)
