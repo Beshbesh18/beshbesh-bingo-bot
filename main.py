@@ -636,13 +636,19 @@ def reset_round(refund=False):
 
 
 BOT_NAMES = [
-    "@aputu12", "@brook_06", "@nati_12", "@ephrem_21", "@dawit_99", "@samuel_07",
-    "@henok_19", "@abel_23", "@yared_04", "@solomon_88",
-    "Brook", "Ephrem", "Dawit", "Samuel", "Nati", "Henok", "Abel", "Yohannes",
-    "Yared", "Solomon", "Biniyam", "Bereket", "Nahom", "Elias", "Eyob", "Mikiyas",
-    "ብሩክ12", "ብሩክ06", "ኤፍሬም", "መሀመድ አሊ", "ዳዊት", "ሳሙኤል", "ናቲ", "ሄኖክ",
-    "አቤል", "ያሬድ", "ሰለሞን", "ተመስገን", "ታደሰ", "በረከት", "እዮብ", "ቢንያም",
-    "Selam", "Mekdes", "Tigist",
+    "Alex", "shanbel alemu", "aweke kidu", "@kiduse25", "teddddo", "obsa",
+    "King 👑", "@abduker_k", "ketema mulatu", "nebiy eshete",
+    "Mohamed kedir", "@mikkireal", "@miki1876", "nati ♂️",
+    "dingetu temogne", "firezer kebede", "@esmael345", "@zjhgtk12",
+    "Dagne dish", "zumra Mohamed", "Endris", "ayu adama", "Nuru Nuru",
+    "mustofa seyaa", "chala bekele", "@Eyoo1994",
+    "@aputu12", "@brook_06", "@nati_12", "@ephrem_21", "@dawit_99",
+    "@samuel_07", "@henok_19", "@abel_23", "@yared_04", "@solomon_88",
+    "Brook", "Ephrem", "Dawit", "Samuel", "Nati", "Henok", "Abel",
+    "Yohannes", "Yared", "Solomon", "Biniyam", "Bereket", "Nahom",
+    "Elias", "Eyob", "Mikiyas", "ብሩክ12", "ብሩክ06", "ኤፍሬም", "መሀመድ አሊ",
+    "ዳዊት", "ሳሙኤል", "ናቲ", "ሄኖክ", "አቤል", "ያሬድ", "ሰለሞን", "ተመስገን",
+    "ታደሰ", "በረከት", "እዮብ", "ቢንያም", "Mekdes", "Tigist",
     "ህይወት ትቀጥላለች", "ዕድል ዛሬ ነው", "በጸሎት ብቻ", "ቀስ ብሎ ይሳካል",
     "ሁሉም በጊዜው", "ትዕግስት ፍሬ አለው",
 ]
@@ -973,15 +979,11 @@ def call_next_number():
 
     call_index = len(game_state["called_numbers"]) + 1
     if "target_close_call" not in game_state:
-        # Mostly around 19-24 calls for suspense, with rare early (e.g. 6, 12) or late (e.g. 34) closes
+        # Avoid early closes (e.g., 6th-10th call); target 19+ calls so rounds close later
         r = random.random()
-        if r < 0.02:
-            game_state["target_close_call"] = random.choice([6, 7, 8])
-        elif r < 0.08:
-            game_state["target_close_call"] = random.choice([11, 12, 13, 14])
-        elif r < 0.86:
+        if r < 0.75:
             game_state["target_close_call"] = random.randint(19, 24)
-        elif r < 0.96:
+        elif r < 0.93:
             game_state["target_close_call"] = random.randint(25, 30)
         else:
             game_state["target_close_call"] = random.randint(31, 36)
@@ -1049,9 +1051,10 @@ def call_next_number():
     for key, mat in game_state["card_matrices"].items():
         if any(num in row for row in mat):
             game_state["marked"].setdefault(key, {"FREE"}).add(num)
-    winners = find_winners()
-    if winners:
-        declare_winners(winners)
+    if call_index >= 19:
+        winners = find_winners()
+        if winners:
+            declare_winners(winners)
 
 
 def auto_caller_loop():
