@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
-"""
-\u1260\u123d \u1260\u123d \u1262\u1295\u130e (Besh Besh Bingo) \u2014 Telegram bot + Telegram Mini App
+"""m bot + Telegram Mini App
 1-600 Card Selection (50s timer), 1-75 Master Grid & Cards,
 Play/Win Wallets, Deposit/Withdraw, Line Bingo check, and Voice Number Calling.
 
