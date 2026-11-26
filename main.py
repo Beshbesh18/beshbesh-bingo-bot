@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-"""m bot + Telegram Mini App
+"""
+\u1260\u123d \u1260\u123d \u1262\u1295\u130e (Besh Besh Bingo) \u2014 Telegram bot + Telegram Mini App
 1-600 Card Selection (50s timer), 1-75 Master Grid & Cards,
 Play/Win Wallets, Deposit/Withdraw, Line Bingo check, and Voice Number Calling.
 
@@ -956,7 +957,7 @@ def game_loop_worker():
 
 
 def call_next_number():
-    """Call one number, auto-mark every card and end the round as soon as someone has bingo."""
+    """Call one random number from 1..75, auto-mark every card, and end the round as soon as someone wins."""
     if game_state["phase"] != "playing":
         return
     remaining = [n for n in range(1, MAX_NUMBERS_POOL + 1) if n not in game_state["called_numbers"]]
@@ -964,96 +965,16 @@ def call_next_number():
         reset_round(refund=True)
         return
 
-    if "round_favors_bot" not in game_state:
-        try:
-            human_pct = max(0.0, min(100.0, float(get_setting("human_win_percent"))))
-        except Exception:
-            human_pct = 15.0
-        has_human = any(not is_bot_uid(u) and c for u, c in game_state["player_cards"].items())
-        has_bot = any(is_bot_uid(u) and c for u, c in game_state["player_cards"].items())
-        if has_human and has_bot and not game_state.get("bonus_round"):
-            game_state["round_favors_bot"] = (random.random() * 100.0) >= human_pct
-        else:
-            game_state["round_favors_bot"] = False
-
-    call_index = len(game_state["called_numbers"]) + 1
-    if "target_close_call" not in game_state:
-        # Avoid early closes (e.g., 6th-10th call); target 19+ calls so rounds close later
-        r = random.random()
-        if r < 0.75:
-            game_state["target_close_call"] = random.randint(19, 24)
-        elif r < 0.93:
-            game_state["target_close_call"] = random.randint(25, 30)
-        else:
-            game_state["target_close_call"] = random.randint(31, 36)
-
-    target_close = game_state.get("target_close_call", 22)
-
-    all_closing_nums = []
-    human_closing_nums = set()
-    human_min_missing = 99
-    bot_closing_nums = []
-    bot_advance_nums = []
-
-    for uid, cards in game_state["player_cards"].items():
-        is_b = is_bot_uid(uid)
-        for cid in cards:
-            mat = game_state["card_matrices"].get((uid, cid))
-            mk = game_state["marked"].get((uid, cid), {"FREE"})
-            if mat:
-                miss = cells_needed_for_bingo(mat, mk)
-                if not is_b:
-                    human_min_missing = min(human_min_missing, len(miss))
-                    if len(miss) == 1:
-                        human_closing_nums.add(miss[0])
-                        if miss[0] in remaining:
-                            all_closing_nums.append(miss[0])
-                else:
-                    if len(miss) == 1 and miss[0] in remaining:
-                        bot_closing_nums.append(miss[0])
-                        all_closing_nums.append(miss[0])
-                    elif len(miss) > 1:
-                        bot_advance_nums.extend([m for m in miss if m in remaining])
-
-    num = None
-    if game_state.get("round_favors_bot"):
-        if human_min_missing <= 1 and bot_closing_nums:
-            num = random.choice(bot_closing_nums)
-        elif call_index >= target_close and bot_closing_nums:
-            num = random.choice(bot_closing_nums)
-        else:
-            # Avoid closing prematurely before target_close unless it's a rare early target
-            pool_no_close = [n for n in remaining if n not in human_closing_nums and n not in bot_closing_nums]
-            if call_index < target_close and pool_no_close:
-                safe_adv = [n for n in bot_advance_nums if n in pool_no_close]
-                num = random.choice(safe_adv) if (safe_adv and random.random() < 0.65) else random.choice(pool_no_close)
-            else:
-                safe_pool = [n for n in remaining if n not in human_closing_nums] or remaining
-                safe_advance = [n for n in bot_advance_nums if n in safe_pool]
-                if safe_advance and random.random() < 0.65:
-                    num = random.choice(safe_advance)
-                else:
-                    num = random.choice(safe_pool)
-    else:
-        if call_index >= target_close and all_closing_nums:
-            num = random.choice(all_closing_nums)
-        elif call_index < max(5, target_close - 2):
-            non_closing = [n for n in remaining if n not in all_closing_nums]
-            if non_closing and random.random() < 0.85:
-                num = random.choice(non_closing)
-
-    if num is None:
-        num = random.choice(remaining)
-
+    num = random.choice(remaining)
     game_state["called_numbers"].append(num)
     game_state["current_number"] = num
     for key, mat in game_state["card_matrices"].items():
         if any(num in row for row in mat):
             game_state["marked"].setdefault(key, {"FREE"}).add(num)
-    if call_index >= 19:
-        winners = find_winners()
-        if winners:
-            declare_winners(winners)
+
+    winners = find_winners()
+    if winners:
+        declare_winners(winners)
 
 
 def auto_caller_loop():
