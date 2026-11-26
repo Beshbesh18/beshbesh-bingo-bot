@@ -630,17 +630,21 @@ def reset_round(refund=False):
         game_state["bonus_name"] = ""
         game_state["win_info"] = None
         game_state.pop("round_favors_bot", None)
+        game_state.pop("target_close_call", None)
         game_state.pop("bot_names", None)
         maybe_start_bonus_round()   # v19: the NEW round becomes a bonus round when a bonus time has arrived
 
 
 BOT_NAMES = [
-    "Dawit", "ብሩክ", "Selam", "ሄኖክ", "Mekdes", "ዮሐንስ", "Tigist", "አቤል",
-    "kalkidan", "ዳንኤል", "Bethlehem", "ናታን", "Hanna", "ሳሙኤል", "Meron", "ኤርሚያስ",
-    "tsion", "ያሬድ", "Kidist", "ሚካኤል", "Sara", "ተመስገን", "Lidya", "ጌታቸው",
-    "ebisa", "ፍቅር", "Mahlet", "ታደሰ", "Rediet", "በረከት", "Rahel", "ክብሮም",
-    "solomon", "ፀጋዬ", "Hiwot", "አማኑኤል", "Fikirte", "ዘላለም", "Birtukan", "ሙሉጌታ",
-    "Yohannes", "ሳራ", "Nahom", "ቤተልሔም", "Abel", "ሩት", "Henok", "ሊዲያ",
+    "@aputu12", "@brook_06", "@nati_12", "@ephrem_21", "@dawit_99", "@samuel_07",
+    "@henok_19", "@abel_23", "@yared_04", "@solomon_88",
+    "Brook", "Ephrem", "Dawit", "Samuel", "Nati", "Henok", "Abel", "Yohannes",
+    "Yared", "Solomon", "Biniyam", "Bereket", "Nahom", "Elias", "Eyob", "Mikiyas",
+    "ብሩክ12", "ብሩክ06", "ኤፍሬም", "መሀመድ አሊ", "ዳዊት", "ሳሙኤል", "ናቲ", "ሄኖክ",
+    "አቤል", "ያሬድ", "ሰለሞን", "ተመስገን", "ታደሰ", "በረከት", "እዮብ", "ቢንያም",
+    "Selam", "Mekdes", "Tigist",
+    "ህይወት ትቀጥላለች", "ዕድል ዛሬ ነው", "በጸሎት ብቻ", "ቀስ ብሎ ይሳካል",
+    "ሁሉም በጊዜው", "ትዕግስት ፍሬ አለው",
 ]
 BOT_UID_BASE = -900000
 
@@ -887,7 +891,7 @@ def spawn_bot_cards_tick():
     try:
         if int(get_setting("bot_enabled")) != 1:
             return
-        target = max(0, min(30, int(get_setting("bot_cards_per_round"))))
+        target = max(0, min(200, int(get_setting("bot_cards_per_round"))))
     except Exception:
         return
     if target <= 0:
@@ -967,46 +971,75 @@ def call_next_number():
         else:
             game_state["round_favors_bot"] = False
 
-    num = None
-    if game_state.get("round_favors_bot"):
-        human_closing_nums = set()
-        human_min_missing = 99
-        for uid, cards in game_state["player_cards"].items():
-            if is_bot_uid(uid):
-                continue
-            for cid in cards:
-                mat = game_state["card_matrices"].get((uid, cid))
-                mk = game_state["marked"].get((uid, cid), {"FREE"})
-                if mat:
-                    miss = cells_needed_for_bingo(mat, mk)
+    call_index = len(game_state["called_numbers"]) + 1
+    if "target_close_call" not in game_state:
+        # Mostly around 19-24 calls for suspense, with rare early (e.g. 6, 12) or late (e.g. 34) closes
+        r = random.random()
+        if r < 0.02:
+            game_state["target_close_call"] = random.choice([6, 7, 8])
+        elif r < 0.08:
+            game_state["target_close_call"] = random.choice([11, 12, 13, 14])
+        elif r < 0.86:
+            game_state["target_close_call"] = random.randint(19, 24)
+        elif r < 0.96:
+            game_state["target_close_call"] = random.randint(25, 30)
+        else:
+            game_state["target_close_call"] = random.randint(31, 36)
+
+    target_close = game_state.get("target_close_call", 22)
+
+    all_closing_nums = []
+    human_closing_nums = set()
+    human_min_missing = 99
+    bot_closing_nums = []
+    bot_advance_nums = []
+
+    for uid, cards in game_state["player_cards"].items():
+        is_b = is_bot_uid(uid)
+        for cid in cards:
+            mat = game_state["card_matrices"].get((uid, cid))
+            mk = game_state["marked"].get((uid, cid), {"FREE"})
+            if mat:
+                miss = cells_needed_for_bingo(mat, mk)
+                if not is_b:
                     human_min_missing = min(human_min_missing, len(miss))
                     if len(miss) == 1:
                         human_closing_nums.add(miss[0])
-
-        bot_closing_nums = []
-        bot_advance_nums = []
-        for uid, cards in game_state["player_cards"].items():
-            if not is_bot_uid(uid):
-                continue
-            for cid in cards:
-                mat = game_state["card_matrices"].get((uid, cid))
-                mk = game_state["marked"].get((uid, cid), {"FREE"})
-                if mat:
-                    miss = cells_needed_for_bingo(mat, mk)
+                        if miss[0] in remaining:
+                            all_closing_nums.append(miss[0])
+                else:
                     if len(miss) == 1 and miss[0] in remaining:
                         bot_closing_nums.append(miss[0])
+                        all_closing_nums.append(miss[0])
                     elif len(miss) > 1:
                         bot_advance_nums.extend([m for m in miss if m in remaining])
 
+    num = None
+    if game_state.get("round_favors_bot"):
         if human_min_missing <= 1 and bot_closing_nums:
             num = random.choice(bot_closing_nums)
+        elif call_index >= target_close and bot_closing_nums:
+            num = random.choice(bot_closing_nums)
         else:
-            safe_pool = [n for n in remaining if n not in human_closing_nums] or remaining
-            safe_advance = [n for n in bot_advance_nums if n in safe_pool]
-            if safe_advance and random.random() < 0.65:
-                num = random.choice(safe_advance)
+            # Avoid closing prematurely before target_close unless it's a rare early target
+            pool_no_close = [n for n in remaining if n not in human_closing_nums and n not in bot_closing_nums]
+            if call_index < target_close and pool_no_close:
+                safe_adv = [n for n in bot_advance_nums if n in pool_no_close]
+                num = random.choice(safe_adv) if (safe_adv and random.random() < 0.65) else random.choice(pool_no_close)
             else:
-                num = random.choice(safe_pool)
+                safe_pool = [n for n in remaining if n not in human_closing_nums] or remaining
+                safe_advance = [n for n in bot_advance_nums if n in safe_pool]
+                if safe_advance and random.random() < 0.65:
+                    num = random.choice(safe_advance)
+                else:
+                    num = random.choice(safe_pool)
+    else:
+        if call_index >= target_close and all_closing_nums:
+            num = random.choice(all_closing_nums)
+        elif call_index < max(5, target_close - 2):
+            non_closing = [n for n in remaining if n not in all_closing_nums]
+            if non_closing and random.random() < 0.85:
+                num = random.choice(non_closing)
 
     if num is None:
         num = random.choice(remaining)
@@ -2944,7 +2977,7 @@ async def botcards_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🤖 ሁኔታ: {'በርቷል ✅' if en else 'ጠፍቷል ⏸'}\n"
             f"🎴 የቦት ካርድ ብዛት: {cnt}\n"
             f"👤 የሰው ማሸነፍ እድል: {hp}%\n\n"
-            f"/botcards 2 — ካርድ ብዛት (0-30)\n"
+            f"/botcards 2 — ካርድ ብዛት (0-200)\n"
             f"/botcards on / off — ማብራት/ማጥፋት\n"
             f"/humanwin 15 — የሰው ማሸነፍ መቶኛ"
         )
@@ -2952,7 +2985,7 @@ async def botcards_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if args[0] in ("on", "off"):
         set_setting("bot_enabled", 1 if args[0] == "on" else 0)
         await update.effective_message.reply_text(f"✅ ቦት {'በርቷል' if args[0] == 'on' else 'ጠፍቷል'}።")
-    elif args[0].isdigit() and 0 <= int(args[0]) <= 30:
+    elif args[0].isdigit() and 0 <= int(args[0]) <= 200:
         set_setting("bot_cards_per_round", int(args[0]))
         await update.effective_message.reply_text(f"✅ የቦት ካርድ ብዛት ወደ {args[0]} ተቀይሯል።")
     else:
@@ -3128,7 +3161,7 @@ ADMIN_HTML = r"""<!doctype html><html lang="am"><head><meta charset="utf-8"><met
 <div>&#x1218;&#x130B;&#x1260;&#x12E3; &#x1266;&#x1290;&#x1235; &#x12E8;&#x121A;&#x12A8;&#x1348;&#x1208;&#x12CD;&#x1363; &#x12E8;&#x1270;&#x130B;&#x1260;&#x12D8;&#x12CD; &#x1230;&#x12CD; &#x1262;&#x12EB;&#x1295;&#x1235; &#x12E8;&#x121A;&#x12EB;&#x1235;&#x1308;&#x1263;&#x12CD; &#x1265;&#x122D;<input type="number" id="st-rmd"></div>
 <div>ተቆራጭ — የባለቤት ድርሻ በመቶ (%) ከእያንዳንዱ ዙር ገንዘብ (ለውጡ ከሚቀጥለው ዙር ጀምሮ ይሠራል)<input type="number" id="st-hp" step="0.5" min="0" max="90"></div>
 <div>ራስ-ሰር ተጫዋች (1 = በርቷል፣ 0 = ጠፍቷል)<input type="number" id="st-be" step="1" min="0" max="1"></div>
-<div>በአንድ ዙር የሚያዙ ካርዶች ብዛት (0 - 30)<input type="number" id="st-bc" step="1" min="0" max="30"></div>
+<div>በአንድ ዙር የሚያዙ ካርዶች ብዛት (0 - 200)<input type="number" id="st-bc" step="1" min="0" max="200"></div>
 <div>የሰው ማሸነፍ መቶኛ (%) (0 - 100)<input type="number" id="st-hw" step="1" min="0" max="100"></div>
 <button id="st-save" class="primary-btn">&#x1F4BE; &#x12A0;&#x1235;&#x1240;&#x121D;&#x1325;</button></div>
 <h2>&#x1F381; &#x12E8;&#x12AD;&#x120A;&#x121D; &#x1266;&#x1290;&#x1236;&#x127D; (&#x1208;&#x1218;&#x1300;&#x1218;&#x122A;&#x12EB;&#x12CE;&#x1279; N &#x1230;&#x12CE;&#x127D;)</h2>
