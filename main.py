@@ -630,6 +630,7 @@ def reset_round(refund=False):
         game_state["bonus_name"] = ""
         game_state["win_info"] = None
         game_state.pop("round_favors_bot", None)
+        game_state.pop("round_favors_human", None)
         game_state.pop("target_close_call", None)
         game_state.pop("bot_names", None)
         maybe_start_bonus_round()   # v19: the NEW round becomes a bonus round when a bonus time has arrived
@@ -957,7 +958,7 @@ def game_loop_worker():
 
 
 def call_next_number():
-    """Call one random number from 1..75, auto-mark every card, and end the round as soon as someone wins."""
+    """Call one number, auto-mark every card and end the round strictly following human_win_percent."""
     if game_state["phase"] != "playing":
         return
     remaining = [n for n in range(1, MAX_NUMBERS_POOL + 1) if n not in game_state["called_numbers"]]
@@ -965,16 +966,116 @@ def call_next_number():
         reset_round(refund=True)
         return
 
-    num = random.choice(remaining)
+    try:
+        human_pct = max(0.0, min(100.0, float(get_setting("human_win_percent"))))
+    except Exception:
+        human_pct = 15.0
+
+    if "round_favors_human" not in game_state:
+        has_human = any(not is_bot_uid(u) and c for u, c in game_state["player_cards"].items())
+        has_bot = any(is_bot_uid(u) and c for u, c in game_state["player_cards"].items())
+        if game_state.get("bonus_round"):
+            game_state["round_favors_human"] = True
+        elif human_pct <= 0.0:
+            game_state["round_favors_human"] = False
+        elif human_pct >= 100.0:
+            game_state["round_favors_human"] = True
+        elif has_human and has_bot:
+            game_state["round_favors_human"] = (random.random() * 100.0) < human_pct
+        else:
+            game_state["round_favors_human"] = has_human and not has_bot
+
+    favors_human = bool(game_state.get("round_favors_human"))
+    call_index = len(game_state["called_numbers"]) + 1
+    if "target_close_call" not in game_state:
+        r = random.random()
+        if r < 0.75:
+            game_state["target_close_call"] = random.randint(19, 24)
+        elif r < 0.93:
+            game_state["target_close_call"] = random.randint(25, 30)
+        else:
+            game_state["target_close_call"] = random.randint(31, 36)
+
+    target_close = max(19, game_state.get("target_close_call", 22))
+
+    human_closing_nums = set()
+    human_advance_nums = []
+    bot_closing_nums = set()
+    bot_advance_nums = []
+
+    for uid, cards in game_state["player_cards"].items():
+        is_b = is_bot_uid(uid)
+        for cid in cards:
+            mat = game_state["card_matrices"].get((uid, cid))
+            mk = game_state["marked"].get((uid, cid), {"FREE"})
+            if not mat:
+                continue
+            miss = [m for m in cells_needed_for_bingo(mat, mk) if m in remaining]
+            if not is_b:
+                if len(miss) == 1:
+                    human_closing_nums.add(miss[0])
+                elif len(miss) > 1:
+                    human_advance_nums.extend(miss)
+            else:
+                if len(miss) == 1:
+                    bot_closing_nums.add(miss[0])
+                elif len(miss) > 1:
+                    bot_advance_nums.extend(miss)
+
+    num = None
+    if favors_human:
+        safe_for_human = [n for n in remaining if n not in bot_closing_nums] or remaining
+        h_close_safe = [n for n in human_closing_nums if n in safe_for_human]
+        h_adv_safe = [n for n in human_advance_nums if n in safe_for_human]
+
+        if call_index >= target_close and h_close_safe:
+            num = random.choice(h_close_safe)
+        elif call_index < max(5, target_close - 2):
+            no_close = [n for n in safe_for_human if n not in human_closing_nums]
+            if no_close and random.random() < 0.85:
+                num = random.choice(no_close)
+            elif h_adv_safe:
+                num = random.choice(h_adv_safe)
+        else:
+            if h_adv_safe and random.random() < 0.65:
+                num = random.choice(h_adv_safe)
+            else:
+                num = random.choice(safe_for_human)
+    else:
+        safe_for_bot = [n for n in remaining if n not in human_closing_nums] or remaining
+        b_close_safe = [n for n in bot_closing_nums if n in safe_for_bot]
+        b_adv_safe = [n for n in bot_advance_nums if n in safe_for_bot]
+
+        if call_index >= target_close and b_close_safe:
+            num = random.choice(b_close_safe)
+        elif call_index < max(5, target_close - 2):
+            no_close = [n for n in safe_for_bot if n not in bot_closing_nums]
+            if no_close and random.random() < 0.85:
+                num = random.choice(no_close)
+            elif b_adv_safe:
+                num = random.choice(b_adv_safe)
+        else:
+            if b_adv_safe and random.random() < 0.65:
+                num = random.choice(b_adv_safe)
+            else:
+                num = random.choice(safe_for_bot)
+
+    if num is None:
+        num = random.choice(remaining)
+
     game_state["called_numbers"].append(num)
     game_state["current_number"] = num
     for key, mat in game_state["card_matrices"].items():
         if any(num in row for row in mat):
             game_state["marked"].setdefault(key, {"FREE"}).add(num)
 
-    winners = find_winners()
-    if winners:
-        declare_winners(winners)
+    if call_index >= 19:
+        winners = find_winners()
+        if winners:
+            if human_pct <= 0.0 and not game_state.get("bonus_round"):
+                winners = [w for w in winners if is_bot_uid(w[0])]
+            if winners:
+                declare_winners(winners)
 
 
 def auto_caller_loop():
