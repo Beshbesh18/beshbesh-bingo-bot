@@ -633,6 +633,10 @@ def reset_round(refund=False):
         game_state.pop("round_favors_human", None)
         game_state.pop("target_close_call", None)
         game_state.pop("bot_names", None)
+        game_state.pop("designated_bot_winner", None)
+        game_state.pop("bot_initial_burst_done", None)
+        game_state.pop("bot_round_target", None)
+        game_state.pop("bot_setting_ref", None)
         maybe_start_bonus_round()   # v19: the NEW round becomes a bonus round when a bonus time has arrived
 
 
@@ -870,7 +874,13 @@ def try_award(uid, username=""):
     with game_lock:
         if game_state["phase"] != "playing":
             return None
+        try:
+            human_pct = max(0.0, min(100.0, float(get_setting("human_win_percent"))))
+        except Exception:
+            human_pct = 15.0
         winners = find_winners()
+        if human_pct <= 0.0 and not game_state.get("bonus_round"):
+            winners = [w for w in winners if is_bot_uid(w[0])]
         if not winners:
             return None
         declare_winners(winners)
@@ -892,6 +902,27 @@ def cells_needed_for_bingo(card, marked):
     return best or []
 
 
+def _add_single_bot_card(current_bot_cards):
+    available = [n for n in range(1, TOTAL_CARDS + 1) if n not in game_state["taken_card_numbers"]]
+    if not available:
+        return False
+    card_num = random.choice(available)
+    bot_uid = BOT_UID_BASE - (current_bot_cards + 1)
+    bot_names_map = game_state.setdefault("bot_names", {})
+    if bot_uid not in bot_names_map:
+        used = set(bot_names_map.values())
+        choices = [n for n in BOT_NAMES if n not in used] or BOT_NAMES
+        bot_names_map[bot_uid] = random.choice(choices)
+
+    game_state["taken_card_numbers"].add(card_num)
+    game_state["player_cards"].setdefault(bot_uid, []).append(card_num)
+    game_state["prize"] += CARD_COST
+    game_state["card_paid_from"][(bot_uid, card_num)] = "bot"
+    game_state["card_matrices"][(bot_uid, card_num)] = generate_75_bingo_card(card_num)
+    game_state["marked"][(bot_uid, card_num)] = {"FREE"}
+    return True
+
+
 def spawn_bot_cards_tick():
     if game_state["phase"] != "selecting":
         return
@@ -910,28 +941,50 @@ def spawn_bot_cards_tick():
     if current_bot_cards >= target:
         return
 
-    elapsed = SELECTION_TIME_SECONDS - max(0, game_state["selection_ends_at"] - time.time())
-    if elapsed < 4 or random.random() > 0.35:
+    time_left = max(0.0, game_state["selection_ends_at"] - time.time())
+    elapsed = SELECTION_TIME_SECONDS - time_left
+    if elapsed < 2.0:
         return
 
-    available = [n for n in range(1, TOTAL_CARDS + 1) if n not in game_state["taken_card_numbers"]]
-    if not available:
+    # Leave a natural slight variance (90% to 100% of target, e.g., 27-30 when target is 30)
+    # while ensuring fast initial burst + steady pace so high targets (30, 50, 100) are reached reliably.
+    if "bot_round_target" not in game_state or game_state.get("bot_setting_ref") != target:
+        if target >= 10:
+            low_bound = max(1, int(round(target * 0.90)))
+            game_state["bot_round_target"] = random.randint(low_bound, target)
+        else:
+            game_state["bot_round_target"] = target
+        game_state["bot_setting_ref"] = target
+
+    effective_target = game_state["bot_round_target"]
+    if current_bot_cards >= effective_target:
         return
 
-    card_num = random.choice(available)
-    bot_uid = BOT_UID_BASE - (current_bot_cards + 1)
-    bot_names_map = game_state.setdefault("bot_names", {})
-    if bot_uid not in bot_names_map:
-        used = set(bot_names_map.values())
-        choices = [n for n in BOT_NAMES if n not in used] or BOT_NAMES
-        bot_names_map[bot_uid] = random.choice(choices)
+    needed = effective_target - current_bot_cards
+    if not game_state.get("bot_initial_burst_done"):
+        game_state["bot_initial_burst_done"] = True
+        burst = min(needed, max(1, int(round(effective_target * 0.28))))
+        for _ in range(burst):
+            if _add_single_bot_card(current_bot_cards):
+                current_bot_cards += 1
+        return
 
-    game_state["taken_card_numbers"].add(card_num)
-    game_state["player_cards"].setdefault(bot_uid, []).append(card_num)
-    game_state["prize"] += CARD_COST
-    game_state["card_paid_from"][(bot_uid, card_num)] = "bot"
-    game_state["card_matrices"][(bot_uid, card_num)] = generate_75_bingo_card(card_num)
-    game_state["marked"][(bot_uid, card_num)] = {"FREE"}
+    # Pace the remaining cards smoothly across the remaining seconds (finishing ~2s before timer ends)
+    effective_time_left = max(1.0, time_left - 2.0)
+    rate_per_sec = needed / effective_time_left
+
+    if rate_per_sec >= 1.0:
+        base_add = int(rate_per_sec)
+        extra = 1 if random.random() < (rate_per_sec - base_add) else 0
+        to_add = min(needed, base_add + extra)
+    else:
+        # Slightly boost probability so it finishes comfortably before selection ends
+        prob = min(0.95, rate_per_sec * 1.25)
+        to_add = 1 if random.random() < prob else 0
+
+    for _ in range(to_add):
+        if _add_single_bot_card(current_bot_cards):
+            current_bot_cards += 1
 
 
 def game_loop_worker():
@@ -957,6 +1010,13 @@ def game_loop_worker():
             logger.exception("game_loop_worker error")
 
 
+def _ensure_bot_cards_for_zero_human():
+    """If human_win_percent is 0 and humans joined without bots, spawn at least 1 bot card so a bot can win cleanly."""
+    has_bot = any(is_bot_uid(u) and c for u, c in game_state["player_cards"].items())
+    if not has_bot:
+        _add_single_bot_card(0)
+
+
 def call_next_number():
     """Call one number, auto-mark every card and end the round strictly following human_win_percent."""
     if game_state["phase"] != "playing":
@@ -970,6 +1030,9 @@ def call_next_number():
         human_pct = max(0.0, min(100.0, float(get_setting("human_win_percent"))))
     except Exception:
         human_pct = 15.0
+
+    if human_pct <= 0.0 and not game_state.get("bonus_round"):
+        _ensure_bot_cards_for_zero_human()
 
     if "round_favors_human" not in game_state:
         has_human = any(not is_bot_uid(u) and c for u, c in game_state["player_cards"].items())
@@ -986,6 +1049,7 @@ def call_next_number():
             game_state["round_favors_human"] = has_human and not has_bot
 
     favors_human = bool(game_state.get("round_favors_human"))
+    strict_bot_only = (human_pct <= 0.0 and not game_state.get("bonus_round"))
     call_index = len(game_state["called_numbers"]) + 1
     if "target_close_call" not in game_state:
         r = random.random()
@@ -998,10 +1062,28 @@ def call_next_number():
 
     target_close = max(19, game_state.get("target_close_call", 22))
 
+    # Pick a specific designated bot card to steer to victory when bots should win
+    bot_card_keys = [
+        (uid, cid)
+        for uid, cards in game_state["player_cards"].items()
+        if is_bot_uid(uid)
+        for cid in cards
+    ]
+    if not favors_human and bot_card_keys:
+        dw = game_state.get("designated_bot_winner")
+        if dw not in bot_card_keys:
+            game_state["designated_bot_winner"] = random.choice(bot_card_keys)
+    else:
+        game_state.pop("designated_bot_winner", None)
+
     human_closing_nums = set()
+    human_near_nums = set()
     human_advance_nums = []
     bot_closing_nums = set()
     bot_advance_nums = []
+    designated_missing = []
+
+    dw = game_state.get("designated_bot_winner")
 
     for uid, cards in game_state["player_cards"].items():
         is_b = is_bot_uid(uid)
@@ -1014,9 +1096,13 @@ def call_next_number():
             if not is_b:
                 if len(miss) == 1:
                     human_closing_nums.add(miss[0])
-                elif len(miss) > 1:
+                elif len(miss) == 2:
+                    human_near_nums.update(miss)
+                elif len(miss) > 2:
                     human_advance_nums.extend(miss)
             else:
+                if (uid, cid) == dw:
+                    designated_missing = miss
                 if len(miss) == 1:
                     bot_closing_nums.add(miss[0])
                 elif len(miss) > 1:
@@ -1042,26 +1128,50 @@ def call_next_number():
             else:
                 num = random.choice(safe_for_human)
     else:
-        safe_for_bot = [n for n in remaining if n not in human_closing_nums] or remaining
+        # Strictly forbid any number that would give a human BINGO
+        non_human_closing = [n for n in remaining if n not in human_closing_nums]
+        safe_for_bot = non_human_closing if non_human_closing else remaining
+        # Also avoid advancing a human from 2-away to 1-away whenever possible
+        extra_safe = [n for n in safe_for_bot if n not in human_near_nums] or safe_for_bot
+
         b_close_safe = [n for n in bot_closing_nums if n in safe_for_bot]
-        b_adv_safe = [n for n in bot_advance_nums if n in safe_for_bot]
+        dw_safe = [n for n in designated_missing if n in extra_safe] or [n for n in designated_missing if n in safe_for_bot]
+        b_adv_safe = [n for n in bot_advance_nums if n in extra_safe] or [n for n in bot_advance_nums if n in safe_for_bot]
 
         if call_index >= target_close and b_close_safe:
             num = random.choice(b_close_safe)
         elif call_index < max(5, target_close - 2):
-            no_close = [n for n in safe_for_bot if n not in bot_closing_nums]
-            if no_close and random.random() < 0.85:
+            # Advance the designated bot card steadily toward 1-away without closing before target_close
+            dw_no_close = [n for n in dw_safe if n not in bot_closing_nums]
+            no_close = [n for n in extra_safe if n not in bot_closing_nums]
+            if dw_no_close and random.random() < 0.55:
+                num = random.choice(dw_no_close)
+            elif no_close and random.random() < 0.85:
                 num = random.choice(no_close)
             elif b_adv_safe:
                 num = random.choice(b_adv_safe)
         else:
-            if b_adv_safe and random.random() < 0.65:
+            if dw_safe and random.random() < 0.80:
+                num = random.choice(dw_safe)
+            elif b_adv_safe and random.random() < 0.70:
                 num = random.choice(b_adv_safe)
             else:
-                num = random.choice(safe_for_bot)
+                num = random.choice(extra_safe)
 
     if num is None:
-        num = random.choice(remaining)
+        if strict_bot_only and non_human_closing:
+            num = random.choice(non_human_closing)
+        else:
+            num = random.choice(remaining)
+
+    # Final hard safety guard when human_win_percent == 0: never call a number that completes any human card
+    if strict_bot_only and num in human_closing_nums and non_human_closing:
+        b_close_safe = [n for n in bot_closing_nums if n in non_human_closing]
+        if b_close_safe:
+            num = random.choice(b_close_safe)
+        else:
+            dw_fallback = [n for n in designated_missing if n in non_human_closing]
+            num = random.choice(dw_fallback or non_human_closing)
 
     game_state["called_numbers"].append(num)
     game_state["current_number"] = num
@@ -1072,7 +1182,7 @@ def call_next_number():
     if call_index >= 19:
         winners = find_winners()
         if winners:
-            if human_pct <= 0.0 and not game_state.get("bonus_round"):
+            if strict_bot_only:
                 winners = [w for w in winners if is_bot_uid(w[0])]
             if winners:
                 declare_winners(winners)
