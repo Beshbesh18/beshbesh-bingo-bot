@@ -286,6 +286,8 @@ def init_db():
         pcols = {r["name"] for r in con.execute("PRAGMA table_info(promo_codes)").fetchall()}
         if "min_deposit" not in pcols:
             con.execute("ALTER TABLE promo_codes ADD COLUMN min_deposit REAL NOT NULL DEFAULT 0")
+        if "starts_at" not in pcols:   # v20: optional start time (Ethiopian-clock window set by the owner)
+            con.execute("ALTER TABLE promo_codes ADD COLUMN starts_at TEXT")
         if fresh_rules:
             # Ethiopia time (UTC+3), standard clock. days: Monday=0 ... Sunday=6
             con.executemany(
@@ -2495,6 +2497,9 @@ def redeem_promo(uid, code):
         if p is None or not p["active"]:
             con.rollback()
             return "invalid", 0, None
+        if p["starts_at"] and p["starts_at"] > fmt_db(utc_now()):
+            con.rollback()
+            return "not_started", 0, {"starts_at": p["starts_at"]}
         if p["expires_at"] and p["expires_at"] < fmt_db(utc_now()):
             con.rollback()
             return "expired", 0, None
@@ -2525,6 +2530,11 @@ def promo_message(uid, result, reward, extra=None):
         extra = extra or {}
         return L(uid, "🔒 ይህ ኮድ ዛሬ ባጠቃላይ %s ብር እና ከዚያ በላይ ገንዘብ ላስገቡ ተጫዋቾች ብቻ ነው።\nዛሬ ያስገቡት: %s ብር።" % (money(extra.get("min", 0)), money(extra.get("have", 0))),
                  "🔒 This code is only for players who deposited %s ETB or more TODAY.\nYou have deposited today: %s ETB." % (money(extra.get("min", 0)), money(extra.get("have", 0))))
+    if result == "not_started":
+        lt = parse_db_time((extra or {}).get("starts_at")) + timedelta(hours=3)
+        when = "%s (%s)" % (eth_clock(lt.hour * 60 + lt.minute), lt.strftime("%Y-%m-%d"))
+        return L(uid, "⏳ ይህ ኮድ ገና አልጀመረም። %s ሲሆን ይጀምራል።" % when,
+                 "⏳ This code has not started yet. It works from %s." % when)
     return {
         "expired": L(uid, "⌛ ይህ ኮድ ጊዜው አልፏል።", "⌛ This code has expired."),
         "used_up": L(uid, "😔 ይህ ኮድ ሙሉ በሙሉ ጥቅም ላይ ውሏል።", "😔 This code has been fully used."),
@@ -2542,7 +2552,12 @@ def promo_announcement(p):
         lines.append("✅ ለማን: ለሁሉም ተጫዋች")
     if p.get("max_uses"):
         lines.append("👥 ለመጀመሪያዎቹ %d ሰዎች ብቻ" % int(p["max_uses"]))
-    if p.get("expires_at"):
+    if p.get("starts_at") and p.get("expires_at"):
+        a = parse_db_time(p["starts_at"]) + timedelta(hours=3)
+        z = parse_db_time(p["expires_at"]) + timedelta(hours=3)
+        lines.append("⏰ ሰዓት: %s እስከ %s (%s)" % (eth_clock(a.hour * 60 + a.minute), eth_clock(z.hour * 60 + z.minute),
+                                          a.strftime("%Y-%m-%d")))
+    elif p.get("expires_at"):
         lines.append("⏰ እስከ: %s" % (parse_db_time(p["expires_at"]) + timedelta(hours=3)).strftime("%Y-%m-%d"))
     lines += ["", "📲 በቦቱ ውስጥ «🎁 ፕሮሞ ኮድ» ን ተጭነው ኮዱን ይላኩ።"]
     return "\n".join(lines)
@@ -3318,7 +3333,8 @@ ADMIN_HTML = r"""<!doctype html><html lang="am"><head><meta charset="utf-8"><met
 <button id="cb-save" class="primary-btn">&#x1F381; &#x1266;&#x1290;&#x1231;&#x1295; &#x134D;&#x1320;&#x122D;</button></div><div id="claim-list"></div>
 <h2>&#x1F3F7; &#x1355;&#x122E;&#x121E; &#x12AE;&#x12F6;&#x127D;</h2>
 <div class="rule-card"><div class="grid2"><input type="text" id="pc-code" placeholder="&#x12AE;&#x12F5;"><input type="number" id="pc-reward" placeholder="&#x123D;&#x120D;&#x121B;&#x1275; (&#x1265;&#x122D;)"></div>
-<div class="grid2"><input type="number" id="pc-max" placeholder="&#x12A8;&#x134D;&#x1270;&#x129B; &#x1270;&#x1320;&#x1243;&#x121A; &#x1265;&#x12DB;&#x1275; (0 = &#x12EB;&#x120D;&#x1270;&#x12C8;&#x1230;&#x1290;)"><input type="date" id="pc-exp" title="&#x12E8;&#x121A;&#x12EB;&#x1260;&#x1243;&#x1260;&#x1275; &#x1240;&#x1295;"></div>
+<div><input type="date" id="pc-exp" title="ቀን (ባዶ = ዛሬ)"><div class="eth">ቀን (ባዶ ከሆነ ዛሬ)። ሰዓት ካልተጠቀምክ ይህ የሚያበቃበት ቀን ነው።</div></div>
+<div id="pc-win"></div>
 <div><input type="number" id="pc-min" placeholder="ዝቅተኛ ጠቅላላ ተቀማጭ (ብር) — ለምሳሌ 100፣ 150፣ 200 (0 = ለሁሉም)"></div>
 <button id="pc-save" class="primary-btn">&#x1F4BE; &#x12AE;&#x12F1;&#x1295; &#x12A0;&#x1235;&#x1240;&#x121D;&#x1325;</button></div><div id="promo-list"></div>
 <h2>🎁 ቦነስ ዙር (ሙሉ ዝግ)</h2><div id="rb-box"></div><button id="rb-add" class="primary-btn">➕ አዲስ ቦነስ</button><div class="eth">ሰዓቱ ሲደርስ የሚጫወተው ጨዋታ ሲያልቅ ቀጣዩ ዙር ቦነስ ዙር ይሆናል። ደራሹ + ቦነሱ ለአሸናፊው (ወይም ለአሸናፊዎች እኩል) ይሰጣል። በቦቱ ውስጥ በ /roundbonus ም መቀየር ይችላሉ።</div>
@@ -4187,9 +4203,10 @@ document.getElementById('add-rule').onclick = () => {
 };
 document.getElementById('pc-save').onclick = async () => {
   const ok = await postJson('/api/admin/promo', {code: document.getElementById('pc-code').value, reward: Number(document.getElementById('pc-reward').value),
-    max_uses: Number(document.getElementById('pc-max').value || 0), min_deposit: Number(document.getElementById('pc-min').value || 0),
-    expires: document.getElementById('pc-exp').value});
-  if (ok) { ['pc-code', 'pc-reward', 'pc-max', 'pc-min', 'pc-exp'].forEach(x => document.getElementById(x).value = ''); loadSettings(); }
+    max_uses: 0, min_deposit: Number(document.getElementById('pc-min').value || 0),
+    expires: document.getElementById('pc-exp').value,
+    ...(document.getElementById('pc-usewin').checked ? {win_start: toMin(document.getElementById('r900-s').value, false), win_end: toMin(document.getElementById('r900-e').value, true)} : {})});
+  if (ok) { ['pc-code', 'pc-reward', 'pc-min', 'pc-exp'].forEach(x => document.getElementById(x).value = ''); loadSettings(); }
 };
 let PROMOS = [];
 async function promoAct(i, what) {
@@ -4218,12 +4235,24 @@ async function showPromoUsers(i) {
   box.innerHTML = `<p><b>ወሰዱት: ${Number(d.count)} ሰዎች</b></p>` + (d.users || []).map(u =>
     `<div class="pl">${esc(u.name)} (ID ${esc(u.user_id)}) · ${esc(fmtTime(u.at))}</div>`).join('');
 }
+function initPromoWin() {
+  const box = document.getElementById('pc-win');
+  if (!box) return;
+  box.innerHTML = '<label><input type="checkbox" id="pc-usewin"> ⏰ የሰዓት መስኮት ተጠቀም (በኢትዮጵያ ሰዓት፤ በፈለግኸው ሰዓት ቀይር)</label>' +
+    '<div id="pc-winbody" style="display:none"><div class="grid2"><div>ከ (የኢትዮጵያ ሰዓት)' + ethSel(900, 's', 900) + '</div><div>እስከ (የኢትዮጵያ ሰዓት)' + ethSel(900, 'e', 1290) + '</div></div>' +
+    '<div class="grid2"><div>ከ (መደበኛ ሰዓት)<input type="time" id="r900-s" value="15:00" oninput="stdSync(900,\'s\')"></div>' +
+    '<div>እስከ (መደበኛ ሰዓት)<input type="time" id="r900-e" value="21:30" oninput="stdSync(900,\'e\')"></div></div><div class="eth" id="r900-eth"></div></div>';
+  document.getElementById('pc-usewin').onchange = e => { document.getElementById('pc-winbody').style.display = e.target.checked ? '' : 'none'; };
+  ethUpd(900);
+}
+initPromoWin();
 function renderPromos(list) {
   PROMOS = list;
   document.getElementById('promo-list').innerHTML = list.map((p, i) =>
     `<div class="req"><b>${esc(p.code)}</b> · ${birr(p.reward)} ብር ${p.active ? '✅' : '⏸'}` +
     `<p>የተጠቀሙ: ${Number(p.uses)}${p.max_uses ? ' / ' + Number(p.max_uses) : ' (ያልተወሰነ)'}` +
     (Number(p.min_deposit) > 0 ? ` · 🔒 ዛሬ ባጠቃላይ ${birr(p.min_deposit)} ብር+ ላስገቡ ብቻ` : ' · ለሁሉም') +
+    (p.starts_at ? ` · ከ: ${esc(fmtTime(p.starts_at))}` : '') +
     (p.expires_at ? ` · እስከ: ${esc(fmtTime(p.expires_at))}` : '') + `</p>` +
     `<button onclick="promoAct(${i},'toggle')" style="${BTN}background:#ffe629">${p.active ? 'አቁም' : 'አስጀምር'}</button>` +
     `<button onclick="showPromoUsers(${i})" style="${BTN}background:#102d19;color:#f4f7f4;border:1px solid #20552d">👥 ማን ወሰደ</button>` +
@@ -4878,17 +4907,34 @@ def admin_promo():
         if reward <= 0 or max_uses < 0:
             return json_error("\u123d\u120d\u121b\u1271 \u12a80 \u1260\u120b\u12ed \u1218\u1206\u1295 \u12a0\u1208\u1260\u1275")
         expires = None
-        if b.get("expires"):
+        starts = None
+        if b.get("win_start") is not None and b.get("win_end") is not None:
+            # v20: time window in Ethiopia time (standard-clock minutes after midnight) on one day (default: today)
+            try:
+                ws, we = int(b["win_start"]), int(b["win_end"])
+                if b.get("expires"):
+                    day = datetime.strptime(str(b["expires"])[:10], "%Y-%m-%d")
+                else:
+                    day = (utc_now() + timedelta(hours=3)).replace(hour=0, minute=0, second=0, microsecond=0)
+            except (TypeError, ValueError):
+                return json_error("ትክክል ያልሆነ መረጃ")
+            if not (0 <= ws < 1440) or not (0 < we <= 1440) or ws == we:
+                return json_error("ሰዓቱ ትክክል አይደለም")
+            if we <= ws:
+                we += 1440   # the window runs past midnight (e.g. until 7 ሰዓት ሌሊት)
+            starts = fmt_db(day + timedelta(minutes=ws) - timedelta(hours=3))
+            expires = fmt_db(day + timedelta(minutes=we) - timedelta(hours=3))
+        elif b.get("expires"):
             try:   # the admin picks a date in Ethiopia time: valid until the end of that day
                 d = datetime.strptime(str(b["expires"])[:10], "%Y-%m-%d")
                 expires = fmt_db(d + timedelta(hours=24) - timedelta(hours=3) - timedelta(seconds=1))
             except ValueError:
                 return json_error("\u1240\u1291 \u1275\u12ad\u12ad\u120d \u12a0\u12ed\u12f0\u1208\u121d")
         con.execute(
-            "INSERT INTO promo_codes(code, reward, max_uses, expires_at, min_deposit, active) VALUES(?,?,?,?,?,1) "
+            "INSERT INTO promo_codes(code, reward, max_uses, expires_at, starts_at, min_deposit, active) VALUES(?,?,?,?,?,?,1) "
             "ON CONFLICT(code) DO UPDATE SET reward=excluded.reward, max_uses=excluded.max_uses, "
-            "expires_at=excluded.expires_at, min_deposit=excluded.min_deposit, active=1",
-            (code, reward, max_uses, expires, min_deposit))
+            "expires_at=excluded.expires_at, starts_at=excluded.starts_at, min_deposit=excluded.min_deposit, active=1",
+            (code, reward, max_uses, expires, starts, min_deposit))
         con.commit()
     return jsonify({"ok": True})
 
