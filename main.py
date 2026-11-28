@@ -2080,10 +2080,14 @@ def parse_telebirr_sms(text):
     t = text or ""
     if not ("\u1270\u1240\u1265\u1208\u12cb\u120d" in t or re.search(r"\breceived\b", t, re.I)):
         return None
-    m = re.search(r"\u1241\u1325\u122d\u12ce\s*([A-Za-z0-9]{8,14})", t) or re.search(r"/receipt/([A-Za-z0-9]{8,14})", t)
+    m = (re.search(r"\u1241\u1325\u122d\u12ce\s*([A-Za-z0-9]{8,14})", t)
+         or re.search(r"transaction\s+(?:number|no\.?|id)\s*(?:is|:)?\s*([A-Za-z0-9]{8,14})", t, re.I)   # English SMS
+         or re.search(r"/receipt/([A-Za-z0-9]{8,14})", t))
     if not m:
         return None
-    a = re.search(r"([\d,]+(?:\.\d+)?)\s*(?:\u1265\u122d|ETB|Birr)", t, re.I)
+    # English SMS: 'You have received ETB 20.00 from NAME(2519****4065) on ...' (the balance comes later - never use it)
+    a = re.search(r"received\s+ETB\s*([\d,]+(?:\.\d+)?)", t, re.I) \
+        or re.search(r"([\d,]+(?:\.\d+)?)\s*(?:\u1265\u122d|ETB|Birr)", t, re.I)
     if not a:
         return None
     try:
@@ -2213,6 +2217,14 @@ def extract_reference(text, method="telebirr"):
             # a SENT-money Telebirr SMS: the masked number in brackets is the receiver - it must be the owner's number
             r = re.search(r"\(([0-9*+]{6,16})\)", t)
             if r and re.sub(r"\D", "", r.group(1))[-4:] != PAY_TAIL:
+                return "", "ይህ ክፍያ ወደ %s የተላከ አይመስልም። እባክዎ ወደ ትክክለኛው ቁጥር ይክፈሉ።" % PAY_NUMBER
+    if ref is None:
+        m = re.search(r"transaction\s+(?:number|no\.?|id)\s*(?:is|:)?\s*([A-Za-z0-9]{8,14})", t, re.I)   # English Telebirr SMS
+        if m:
+            ref = m.group(1).upper()
+            r = re.search(r"\(([0-9*+]{6,16})\)", t)
+            if re.search(r"\b(?:transferred|sent|paid)\b", t, re.I) and not re.search(r"\breceived\b", t, re.I) \
+                    and r and re.sub(r"\D", "", r.group(1))[-4:] != PAY_TAIL:
                 return "", "ይህ ክፍያ ወደ %s የተላከ አይመስልም። እባክዎ ወደ ትክክለኛው ቁጥር ይክፈሉ።" % PAY_NUMBER
     if ref is None:
         m = re.search(r"/receipt/([A-Za-z0-9]{8,14})", t)
@@ -4759,10 +4771,13 @@ def sms_webhook():
     def done(payload):
         return jsonify(payload) if as_json else Response("OK", content_type="text/plain; charset=utf-8")
 
+    logger.info("SMS webhook hit: sender=%r text=%r", sender, (text or "")[:200])
     if SMS_SENDERS and sender and sender.strip().lower() not in SMS_SENDERS:
+        logger.info("SMS ignored: sender %r is not in SMS_SENDER", sender)
         return done({"ok": True, "ignored": "sender"})
     parsed = parse_incoming_sms(text)
     if not parsed:
+        logger.info("SMS ignored: could not read it as an incoming payment SMS")
         return done({"ok": True, "ignored": "not an incoming payment SMS"})
     try:
         result = handle_incoming_sms(parsed)
